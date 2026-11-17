@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local databases and runtime data
+local-data/
+data/
+*.sqlite3
+*.png
+
+# System files
+.DS_Store
+Thumbs.db
+*.log

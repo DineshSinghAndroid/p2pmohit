@@ -1,0 +1,60 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payout Click Tester</title><link rel="stylesheet" href="/static/style.css?v=1794806520"></head><body>
+<main id="login-view" class="login-shell hidden"><div class="login-card panel"><div class="brand-mark">P<span>·</span></div><div class="eyebrow">QUALITY ASSURANCE / PRIVATE INSTANCE</div><h1>Payout Click Tester</h1><p class="muted">Sign in to access the payout reliability console.</p><form id="login-form"><label>Admin username<input name="username" autocomplete="username" required></label><label>Admin password<input name="password" type="password" autocomplete="current-password" required></label><div id="login-error" class="error-text"></div><button class="primary full" type="submit">SIGN IN <span>↗</span></button></form><div class="login-hint">Credentials configured with <code>ADMIN_USER</code> / <code>ADMIN_PASS</code></div></div></main>
+<div id="app-view" class="hidden"><header class="topbar"><div class="brand"><div class="brand-mark small">P<span>·</span></div><div><b>Payout Click Tester</b><small>OPS CONSOLE <i></i> SINGLE WORKER</small></div></div><nav class="nav-tabs"><button type="button" class="nav-tab active" data-tab="console-view">🎮 Console</button><button type="button" class="nav-tab" data-tab="settings-view">⚙️ Settings</button></nav><div class="header-right"><span class="status-pill"><i></i> PRIVATE QA</span></div></header>
+<main class="layout">
+<div id="console-view">
+<section class="intro"><div><div class="eyebrow">PAYOUT RELIABILITY / CONTROL ROOM</div><h1>Accept fast.<br><em>Stay logged in.</em></h1></div><div class="intro-note"><span class="live-dot"></span> BROWSER WORKER <b>READY</b><p>Stays logged in · auto re-login</p></div></section>
+<section class="panel form-panel"><div class="section-head"><div><div class="eyebrow">01 / TEST CONFIGURATION</div><h2>Run parameters</h2></div><div class="lock-note">⌑ &nbsp;Saved automatically</div></div><form id="run-form"><input type="hidden" name="stealth_mode" id="stealth-mode-input" value="true"><div class="field-grid"><label class="wide">Site URL<input name="site_url" type="url" value="https://welcome.p2p-expert-traders.com" required></label><label>Target account email<input name="email" type="email" required autocomplete="off"></label><label>Target account password<input name="password" type="password" required autocomplete="new-password"></label><label>Min amount <span class="unit">INR · optional</span><input name="min_amount" type="number" min="0" step="0.01" placeholder="No minimum"></label><label>Max amount <span class="unit">INR · optional</span><input name="max_amount" type="number" min="0" step="0.01" placeholder="No maximum"></label><label class="wide">Proxy Server <span class="unit">Select 1-10, Rotating or Direct</span><select id="proxy-select" style="margin-top:4px;margin-bottom:6px;width:100%;padding:8px;border-radius:6px;background:rgba(255,255,255,0.06);color:#fff;border:1px solid rgba(255,255,255,0.15);"><option value="">Direct (No Proxy - Mac Internet)</option><option value="http://zkagboxz:rlauds5ubzjx@45.38.107.97:6014">Proxy 1 — 45.38.107.97:6014</option><option value="http://zkagboxz:rlauds5ubzjx@64.137.96.74:6641">Proxy 2 — 64.137.96.74:6641</option><option value="http://zkagboxz:rlauds5ubzjx@198.23.243.226:6361">Proxy 3 — 198.23.243.226:6361</option><option value="http://zkagboxz:rlauds5ubzjx@38.154.185.97:6370">Proxy 4 — 38.154.185.97:6370</option><option value="http://zkagboxz:rlauds5ubzjx@84.247.60.125:6095">Proxy 5 — 84.247.60.125:6095</option><option value="http://zkagboxz:rlauds5ubzjx@191.96.254.138:6185">Proxy 6 — 191.96.254.138:6185</option><option value="http://zkagboxz:rlauds5ubzjx@198.46.161.42:5092">Proxy 7 — 198.46.161.42:5092</option><option value="http://zkagboxz:rlauds5ubzjx@64.137.10.153:5803">Proxy 8 — 64.137.10.153:5803</option><option value="http://zkagboxz:rlauds5ubzjx@104.164.49.38:7693">Proxy 9 — 104.164.49.38:7693</option><option value="http://zkagboxz:rlauds5ubzjx@23.26.71.145:5628">Proxy 10 — 23.26.71.145:5628</option><option value="http://zkagboxz-rotate:rlauds5ubzjx@p.webshare.io:80">Auto-Rotating — p.webshare.io:80</option><option value="custom">Custom Proxy...</option></select><input name="proxy" id="proxy-input" type="text" placeholder="Active Proxy URL" style="width:100%;"></label></div><div class="action-row"><div id="run-message" class="muted"></div><div><label class="sound-toggle"><input type="checkbox" id="sound-on" checked><span>🔔 Sound + alert on accept</span></label><button type="button" id="stop-run" class="stop" disabled>■ &nbsp;STOP</button><button id="start-run" type="submit" class="primary">▶ &nbsp;START TEST</button></div></div></form></section>
+<section class="stats-grid">
+<article class="stat panel"><span>ACCEPTED FOR YOU</span><b id="stat-accepted" class="mint">0</b><small>Orders accepted in your range</small></article>
+<article class="stat panel"><span>SKIPPED</span><b id="stat-skipped">0</b><small>Late, or someone else accepted</small></article>
+<article class="stat panel"><span>REJECTED (429)</span><b id="stat-rate">0</b><small>Site rate-limited the click</small></article>
+<article class="stat panel"><span>TOTAL CLICKS</span><b id="stat-total">0</b><small>Accept for processing clicks</small></article>
+<article class="stat panel"><span>FAILURES</span><b id="stat-failures" class="red">0</b><small id="failure-breakdown">No failure reasons</small></article>
+<article class="stat panel"><span>LATENCY AVG / P95</span><b id="stat-latency">0 / 0</b><small>Milliseconds</small></article>
+</section>
+<section class="panel log-panel"><div class="section-head"><div><div class="eyebrow">02 / LIVE EVENTS</div><h2>Click log <span id="click-count" class="count">0</span></h2></div><a id="export-link" class="export disabled" href="#">⇩ &nbsp;Export CSV</a></div><div class="table-scroll"><table><thead><tr><th>TIME</th><th>PAYOUT ID</th><th>AMOUNT</th><th>POPUP</th><th>OUTCOME</th><th>LATENCY</th><th>DETAIL</th></tr></thead><tbody id="clicks-body"><tr><td class="empty" colspan="7">No run selected — start a test to stream events.</td></tr></tbody></table></div></section>
+<section class="panel history-panel"><div class="section-head"><div><div class="eyebrow">03 / LOCAL SQLITE</div><h2>Run history</h2></div><span class="muted">Run history</span></div><div id="history-list" class="history-list"><div class="empty">No runs yet.</div></div></section>
+</div>
+<div id="settings-view" class="hidden">
+<section class="intro"><div><div class="eyebrow">SYSTEM &amp; PRIVACY CONFIGURATION</div><h1>Browser Stealth &amp; Safety</h1></div></section>
+<section class="panel form-panel">
+<div class="section-head"><div><div class="eyebrow">01 / ANTI-DETECTION CONTROLS</div><h2>Browser Automation Detection</h2></div><div id="stealth-save-status" class="lock-note" style="color:var(--mint);">⌑ Saved automatically</div></div>
+<div style="display:flex;justify-content:space-between;align-items:center;padding:18px 20px;background:rgba(255,255,255,0.03);border:1px solid var(--line);border-radius:10px;margin-bottom:18px;">
+<div style="padding-right:20px;">
+<b style="display:block;font-size:15px;color:#fff;margin-bottom:6px;">Hide Browser Automation Detection (Stealth Mode)</b>
+<p style="margin:0;font-size:12px;color:var(--muted);line-height:1.5;">Hides <code>navigator.webdriver</code>, removes automated test software banners, and injects realistic browser fingerprints to prevent detection, captcha triggers, and policy violations.</p>
+</div>
+<label class="switch"><input type="checkbox" id="stealth-mode-toggle" checked><span class="slider"></span></label>
+</div>
+<div style="border:1px solid #1c3d33;background:#0d262188;border-radius:8px;padding:16px;font-size:12px;color:#a3e8cc;">
+<div style="font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:6px;"><span>🛡️</span> Protection Features Active When Turned ON:</div>
+<ul style="margin:0;padding-left:20px;line-height:1.7;">
+<li><b>navigator.webdriver = undefined:</b> Websites cannot check if the browser is driven by Playwright/Selenium.</li>
+<li><b>Disable Automation Banners:</b> Removes Chrome's default "Chrome is being controlled by automated test software" bar.</li>
+<li><b>Blink Feature Masking:</b> Disables <code>AutomationControlled</code> internal browser flag.</li>
+<li><b>Realistic Runtime:</b> Mocks standard Chrome window runtime, languages, and plugins.</li>
+</ul>
+</div>
+</section>
+<section class="panel form-panel">
+<div class="section-head"><div><div class="eyebrow">02 / ACTIVE TIMERS &amp; DELAYS</div><h2>Timing Overview</h2></div></div>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;">
+<div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
+<span class="eyebrow">POST-ACCEPT FREEZE</span>
+<h3 style="margin:8px 0 4px;font-size:18px;color:var(--mint);">5.0 Seconds</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">Zero clicks &amp; zero refresh for 5s after accepting an order.</p>
+</div>
+<div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
+<span class="eyebrow">EMPTY TABLE REFRESH</span>
+<h3 style="margin:8px 0 4px;font-size:18px;color:#7bd7fb;">3.0 Seconds</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">Auto-refreshes list if no matching orders exist in range.</p>
+</div>
+<div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
+<span class="eyebrow">429 RATE LIMIT COOLDOWN</span>
+<h3 style="margin:8px 0 4px;font-size:18px;color:#f5c86c;">Auto (5s - 30s)</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">Keeps Chrome open and resumes automatically after backoff.</p>
+</div>
+</div>
+</section>
+</div><footer>Built for authorized QA on your own site. Never use with accounts or payout systems without permission.</footer></main></div><script src="/static/app.js?v=local-settings" defer></script></body></html>
