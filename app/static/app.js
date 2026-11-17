@@ -112,6 +112,149 @@ document.querySelectorAll('.nav-tab').forEach(btn => {
       });
     }
 
+    // ---- Saved Accounts (Unlimited) ----
+    let savedAccounts = [];
+    const btnSaveAcc = document.querySelector('#btn-save-acc');
+    const btnToggleSaved = document.querySelector('#btn-toggle-saved-acc');
+    const btnCloseSaved = document.querySelector('#btn-close-saved-acc');
+    const panelSaved = document.querySelector('#saved-acc-panel');
+    const listSaved = document.querySelector('#saved-acc-list');
+    const countSaved = document.querySelector('#saved-acc-count');
+    const msgSaved = document.querySelector('#saved-acc-msg');
+
+    function flashMsg(msg, isError) {
+      if (!msgSaved) return;
+      msgSaved.textContent = msg;
+      msgSaved.style.color = isError ? '#ff8590' : 'var(--mint)';
+      clearTimeout(msgSaved._t);
+      msgSaved._t = setTimeout(() => {
+        msgSaved.textContent = '';
+      }, 3500);
+    }
+
+    function renderSavedAccounts() {
+      if (countSaved) countSaved.textContent = savedAccounts.length;
+      if (!listSaved) return;
+      if (!savedAccounts.length) {
+        listSaved.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:8px 0;">No accounts saved yet. Enter email and password above and click "Save Account".</div>';
+        return;
+      }
+      listSaved.innerHTML = savedAccounts.map((acc, idx) => {
+        const safeEmail = (acc.email || '').replace(/"/g, '&quot;');
+        return `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;gap:8px;">
+            <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">
+              <b style="color:#ffffff;font-size:12px;display:block;overflow:hidden;text-overflow:ellipsis;" title="${safeEmail}">${safeEmail}</b>
+              <span style="color:var(--muted);font-size:10px;font-family:var(--mono);">Password: ••••••••</span>
+            </div>
+            <div style="display:flex;gap:6px;flex-shrink:0;">
+              <button type="button" class="btn-autofill-acc" data-idx="${idx}" style="padding:5px 10px;font-size:11px;font-weight:600;border-radius:5px;background:var(--mint);color:#042116;border:none;cursor:pointer;" title="Autofill this account into the form">📋 Autofill</button>
+              <button type="button" class="btn-copy-acc" data-idx="${idx}" style="padding:5px 8px;font-size:11px;border-radius:5px;background:rgba(255,255,255,0.08);color:#fff;border:1px solid rgba(255,255,255,0.18);cursor:pointer;" title="Copy email & password">📄 Copy</button>
+              <button type="button" class="btn-del-acc" data-idx="${idx}" style="padding:5px 8px;font-size:11px;border-radius:5px;background:#2a161b;color:#ff8590;border:1px solid #55242d;cursor:pointer;" title="Delete this account">🗑</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function persistAccounts() {
+      try {
+        localStorage.setItem('pct_saved_accounts', JSON.stringify(savedAccounts));
+      } catch (_) {}
+      fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ saved_accounts: savedAccounts })
+      }).catch(() => {});
+    }
+
+    // Preload from localStorage if available
+    try {
+      const local = localStorage.getItem('pct_saved_accounts');
+      if (local) {
+        const parsed = JSON.parse(local);
+        if (Array.isArray(parsed)) {
+          savedAccounts = parsed;
+          renderSavedAccounts();
+        }
+      }
+    } catch (_) {}
+
+    if (btnSaveAcc) {
+      btnSaveAcc.addEventListener('click', () => {
+        const emailEl = f.elements['email'];
+        const passEl = f.elements['password'];
+        const email = emailEl ? emailEl.value.trim() : '';
+        const password = passEl ? passEl.value : '';
+        if (!email || !password) {
+          flashMsg('⚠ Enter email & password above before saving', true);
+          return;
+        }
+        const existingIdx = savedAccounts.findIndex(a => a.email.toLowerCase() === email.toLowerCase());
+        if (existingIdx >= 0) {
+          savedAccounts[existingIdx].password = password;
+          flashMsg(`✓ Password updated for ${email}`);
+        } else {
+          savedAccounts.unshift({ email, password });
+          flashMsg(`✓ Account saved: ${email}`);
+        }
+        persistAccounts();
+        renderSavedAccounts();
+        if (panelSaved && panelSaved.classList.contains('hidden')) {
+          panelSaved.classList.remove('hidden');
+        }
+      });
+    }
+
+    if (btnToggleSaved) {
+      btnToggleSaved.addEventListener('click', () => {
+        if (panelSaved) panelSaved.classList.toggle('hidden');
+      });
+    }
+
+    if (btnCloseSaved) {
+      btnCloseSaved.addEventListener('click', () => {
+        if (panelSaved) panelSaved.classList.add('hidden');
+      });
+    }
+
+    if (listSaved) {
+      listSaved.addEventListener('click', (e) => {
+        const autofillBtn = e.target.closest('.btn-autofill-acc');
+        const copyBtn = e.target.closest('.btn-copy-acc');
+        const delBtn = e.target.closest('.btn-del-acc');
+
+        if (autofillBtn) {
+          const idx = parseInt(autofillBtn.dataset.idx, 10);
+          const acc = savedAccounts[idx];
+          if (acc) {
+            if (f.elements['email']) f.elements['email'].value = acc.email;
+            if (f.elements['password']) f.elements['password'].value = acc.password;
+            f.dispatchEvent(new Event('input', { bubbles: true }));
+            flashMsg(`✓ Autofilled ${acc.email}!`);
+          }
+        } else if (copyBtn) {
+          const idx = parseInt(copyBtn.dataset.idx, 10);
+          const acc = savedAccounts[idx];
+          if (acc) {
+            navigator.clipboard.writeText(`${acc.email}\t${acc.password}`).then(() => {
+              flashMsg(`✓ Copied credentials for ${acc.email}`);
+            }).catch(() => {
+              flashMsg(`Email: ${acc.email}`);
+            });
+          }
+        } else if (delBtn) {
+          const idx = parseInt(delBtn.dataset.idx, 10);
+          if (idx >= 0 && idx < savedAccounts.length) {
+            const removed = savedAccounts.splice(idx, 1);
+            persistAccounts();
+            renderSavedAccounts();
+            flashMsg(`Removed ${removed[0]?.email || 'account'}`);
+          }
+        }
+      });
+    }
+
     window.addEventListener('dashboard-authenticated',async()=>{
       try {
         const response = await fetch('/api/settings');
@@ -128,6 +271,13 @@ document.querySelectorAll('.nav-tab').forEach(btn => {
           if (sToggle) sToggle.checked = settings['stealth_mode'];
           if (sInput) sInput.value = settings['stealth_mode'] ? 'true' : 'false';
           updateStealthLabel(settings['stealth_mode']);
+        }
+        if (Array.isArray(settings['saved_accounts']) && settings['saved_accounts'].length > 0) {
+          savedAccounts = settings['saved_accounts'];
+          try { localStorage.setItem('pct_saved_accounts', JSON.stringify(savedAccounts)); } catch (_) {}
+          renderSavedAccounts();
+        } else if (savedAccounts.length > 0) {
+          persistAccounts();
         }
       } catch (_) {}
     });

@@ -127,3 +127,25 @@ def test_settings_save_and_retrieve_stealth_mode(tmp_path, monkeypatch):
     saved2 = client.get("/api/settings").json()
     assert saved2["stealth_mode"] is True
 
+
+def test_settings_save_and_retrieve_saved_accounts(tmp_path, monkeypatch):
+    test_settings_file = tmp_path / "saved_settings.json"
+    monkeypatch.setattr(main, "SETTINGS_FILE", test_settings_file)
+    client = TestClient(main.app)
+    client.post("/api/login", json={"username": main.ADMIN_USER, "password": main.ADMIN_PASS})
+
+    accounts = [
+        {"email": "account1@example.com", "password": "pass1"},
+        {"email": "account2@example.com", "password": "pass2"},
+        {"email": "account3@example.com", "password": "pass3"},
+    ]
+    res = client.put("/api/settings", json={"saved_accounts": accounts})
+    assert res.status_code == 200
+
+    saved = client.get("/api/settings").json()
+    assert "saved_accounts" in saved
+    assert len(saved["saved_accounts"]) == 3
+    assert saved["saved_accounts"][0]["email"] == "account1@example.com"
+    assert saved["saved_accounts"][0]["password"] == "pass1"
+
+

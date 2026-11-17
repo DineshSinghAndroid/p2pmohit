@@ -144,9 +144,22 @@ def get_settings(request: Request, response: Response):
 async def put_settings(request: Request):
     _authenticated(request)
     body = await request.json()
-    keep = {k: str(body.get(k, "")) for k in ("site_url", "email", "password", "min_amount", "max_amount", "proxy")}
+    keep = {}
+    try:
+        if SETTINGS_FILE.exists():
+            keep = json.loads(SETTINGS_FILE.read_text())
+    except Exception:
+        pass
+    for k in ("site_url", "email", "password", "min_amount", "max_amount", "proxy"):
+        if k in body:
+            keep[k] = str(body[k])
     if "stealth_mode" in body:
         keep["stealth_mode"] = bool(body["stealth_mode"])
+    if "saved_accounts" in body and isinstance(body["saved_accounts"], list):
+        keep["saved_accounts"] = [
+            {"email": str(a.get("email", "")).strip(), "password": str(a.get("password", "")).strip()}
+            for a in body["saved_accounts"] if isinstance(a, dict) and str(a.get("email", "")).strip()
+        ]
     SETTINGS_FILE.write_text(json.dumps(keep))
     try:
         SETTINGS_FILE.chmod(0o600)
