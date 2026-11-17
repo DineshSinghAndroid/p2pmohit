@@ -41,19 +41,19 @@
 <div class="section-head"><div><div class="eyebrow">02 / ACTIVE TIMERS &amp; DELAYS</div><h2>Timing Overview</h2></div></div>
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;">
 <div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
-<span class="eyebrow">POST-ACCEPT FREEZE</span>
-<h3 style="margin:8px 0 4px;font-size:18px;color:var(--mint);">5.0 Seconds</h3>
-<p style="margin:0;font-size:11px;color:var(--muted);">Zero clicks &amp; zero refresh for 5s after accepting an order.</p>
+<span class="eyebrow">POST-ACCEPT COOLDOWN</span>
+<h3 style="margin:8px 0 4px;font-size:18px;color:var(--mint);">0.0s (Disabled)</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">Zero delay after accept — catches new orders continuously without pausing.</p>
 </div>
 <div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
-<span class="eyebrow">EMPTY TABLE REFRESH</span>
-<h3 style="margin:8px 0 4px;font-size:18px;color:#7bd7fb;">1.5 Seconds</h3>
-<p style="margin:0;font-size:11px;color:var(--muted);">Rapid refresh (1-2s) when no matching orders exist in range.</p>
+<span class="eyebrow">AGGRESSIVE REFRESH</span>
+<h3 style="margin:8px 0 4px;font-size:18px;color:#7bd7fb;">Rapid 300ms</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">Ultra-fast 300ms in-page refresh whenever table has no matching orders.</p>
 </div>
 <div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
-<span class="eyebrow">429 RATE LIMIT COOLDOWN</span>
-<h3 style="margin:8px 0 4px;font-size:18px;color:#f5c86c;">x2 Backoff (2s → 4s → 8s...)</h3>
-<p style="margin:0;font-size:11px;color:var(--muted);">Multiplies by 2 on repeat 429, then automatically resumes.</p>
+<span class="eyebrow">429 RATE LIMIT RECOVERY</span>
+<h3 style="margin:8px 0 4px;font-size:18px;color:#f5c86c;">Instant (1.5s)</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">No long exponential backoff — immediately resumes scanning.</p>
 </div>
 </div>
 </section>

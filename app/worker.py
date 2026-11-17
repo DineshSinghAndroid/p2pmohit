@@ -449,10 +449,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
             _close_any_dialog(page)
             _close_chat_toast(page)
 
-            cooldown = max(0.01, (config.get("delay_ms") or 50) / 1000.0)
-            gap = cooldown - (time.monotonic() - last_click[0])
-            if gap > 0 and stop_event.wait(gap):
-                break
+            # Aggressive scanning: zero artificial cooldown between loop iterations
 
             started = time.perf_counter()
             popup_shown = False
@@ -554,7 +551,18 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     }
 
                     if (!target) {
-                        return Promise.resolve({ clicked: false, reason: 'no_matching_row' });
+                        // Aggressive in-page refresh: click Refresh list every 300ms if no orders
+                        const now = performance.now();
+                        let didRefresh = false;
+                        if (!window.__last_refresh_ms || (now - window.__last_refresh_ms) >= 300) {
+                            window.__last_refresh_ms = now;
+                            const refBtn = [...document.querySelectorAll('button')].find(b => /refresh[\\s]*list/i.test(b.innerText || b.textContent || '') || b.getAttribute('automation-id') === 'autotest_button_refresh');
+                            if (refBtn && !refBtn.disabled && refBtn.offsetParent !== null) {
+                                refBtn.click();
+                                didRefresh = true;
+                            }
+                        }
+                        return Promise.resolve({ clicked: false, refreshed: didRefresh, reason: 'no_matching_row' });
                     }
 
                     // 2. Click the matching button immediately
@@ -631,11 +639,11 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 }""", [min_amt_f, max_amt_f])
 
                 if not turbo.get("clicked"):
-                    # No matching eligible orders in table right now
-                    if stop_event.wait(0.025):
+                    # Micro-wait (15ms) for cancellation before next scan
+                    if stop_event.wait(0.015):
                         break
-                    # Click in-page "Refresh list" button every 1.5 seconds if no matching orders exist
-                    if time.monotonic() - last_refresh[0] >= 1.5:
+                    # Fallback refresh if in-page didn't fire
+                    if time.monotonic() - last_refresh[0] >= 0.3:
                         last_refresh[0] = time.monotonic()
                         _refresh_list(page)
                     continue
@@ -693,12 +701,9 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 if outcome == "RATE_LIMITED":
                     _close_any_dialog(page)
                     consecutive_429[0] += 1
-                    # 2s -> 4s -> 8s -> 16s... (2 * 2^(count-1))
-                    exp_wait = 2.0 * (2 ** (consecutive_429[0] - 1))
-                    exp_wait = min(exp_wait, 64.0)
                     server_wait = _retry_after_seconds(retry_after)
-                    wait_s = max(exp_wait, server_wait)
-                    db.update_run(run_id, "running", error_text=f"Rate limited (429 #{consecutive_429[0]}). Waiting {int(wait_s)}s (x2 backoff) before auto-retry...")
+                    wait_s = max(1.5, server_wait)
+                    db.update_run(run_id, "running", error_text=f"Rate limited (429). Retrying in {wait_s:.1f}s...")
                     last_click[0] = time.monotonic() + wait_s
                     last_refresh[0] = time.monotonic() + wait_s
                     if stop_event.wait(wait_s):
@@ -709,14 +714,9 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 consecutive_429[0] = 0
                 _close_any_dialog(page)
                 last_refresh[0] = time.monotonic()
-                if outcome == "ACCEPTED":
-                    # 5 seconds cooldown after accepting an order: no refresh, no clicks
-                    if stop_event.wait(5.0):
-                        break
-                    last_refresh[0] = time.monotonic()
-                    last_click[0] = time.monotonic()
-                elif outcome == "LIMIT_REACHED":
-                    if stop_event.wait(2.0):
+                # Aggressive: Zero cooldown after accept - immediately scan and catch next orders
+                if outcome == "LIMIT_REACHED":
+                    if stop_event.wait(0.5):
                         break
             except Exception as exc:
                 lat = round((time.perf_counter() - started) * 1000)
