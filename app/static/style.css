@@ -46,4 +46,12 @@
 #proxy-select option{background:#121820!important;color:#ffffff!important;padding:8px 10px}
 #proxy-select option:checked{background:#1a2b25!important;color:#52e3a8!important}
 
+/* ---- Accepted Row Highlight in Click Log ---- */
+#clicks-body tr.row-accepted{background:rgba(74,222,159,0.18)!important;border-left:4px solid var(--mint)}
+#clicks-body tr.row-accepted:hover{background:rgba(74,222,159,0.28)!important}
+#clicks-body tr.row-accepted td{color:#c9f7e2!important;font-weight:600;border-bottom:1px solid rgba(74,222,159,0.25)!important}
+#clicks-body tr.row-accepted td:nth-child(3){color:var(--mint)!important;font-weight:700}
+.outcome.ACCEPTED{color:#042116!important;background:var(--mint)!important;font-weight:700!important}
+
+
 
