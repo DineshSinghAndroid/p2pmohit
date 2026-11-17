@@ -13,14 +13,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Sync code to Lightsail and Rebuild
-        uses: easingthemes/ssh-deploy@v5.1.0
-        with:
-          SSH_PRIVATE_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
-          REMOTE_HOST: ${{ secrets.LIGHTSAIL_HOST }}
-          REMOTE_USER: ubuntu
-          TARGET: /home/ubuntu/app
-          EXCLUDE: "/.git/, /.github/, /local-data/, /.venv/, /__pycache__/"
-          SCRIPT_AFTER: |
-            cd /home/ubuntu/app
-            sudo docker compose up -d --build
+      - name: Sync code to Lightsail and Rebuild Docker
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "" >> ~/.ssh/id_rsa
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          rsync -avz --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='local-data/' \
+            --exclude='.venv/' \
+            --exclude='__pycache__/' \
+            -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=accept-new" \
+            ./ ubuntu@"$HOST":/home/ubuntu/app/
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=accept-new ubuntu@"$HOST" "cd /home/ubuntu/app && sudo docker compose up -d --build"
