@@ -339,14 +339,28 @@ def _visible_rows(page):
     out = []
     try:
         data = page.evaluate("""() => {
+            function isAcceptButton(b) {
+                if (!b || b.disabled) return false;
+                if (b.classList && b.classList.contains('tui-button_disabled')) return false;
+                const autoId = b.getAttribute('automation-id') || '';
+                const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                if (text.includes('another trader') || text.includes('accepted by') || text.includes('too late') || text.includes('expired')) {
+                    return false;
+                }
+                if (autoId === 'autotest_button_tradeAccept') return true;
+                return text === 'accept for processing' || text === 'accept';
+            }
             const out = [];
             const rows = document.querySelectorAll('tr, [role="row"]');
             rows.forEach((tr, idx) => {
                 const text = tr.innerText || '';
                 if (/accepted by another trader/i.test(text)) return;
-                const btn = tr.querySelector('[automation-id="autotest_button_tradeAccept"]') ||
-                            [...tr.querySelectorAll('button')].find(b => /accept\\s*(for\\s*processing)?/i.test(b.innerText || ''));
-                if (!btn || btn.disabled || btn.offsetParent === null) return;
+                const btns = tr.querySelectorAll('button, a[role="button"]');
+                let found = null;
+                for (const b of btns) {
+                    if (isAcceptButton(b) && b.offsetParent !== null) { found = b; break; }
+                }
+                if (!found) return;
                 const m = text.match(/([\\d][\\d\\s\\u00a0\\u202f.,]*)\\s*INR/i);
                 if (m) {
                     out.push({ i: idx, amt_str: m[1] });
@@ -388,6 +402,8 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
     last_click = [0.0]
     last_refresh = [time.monotonic()]
     consecutive_429 = [0]
+    min_amt_f = float(min_amount) if min_amount is not None else None
+    max_amt_f = float(max_amount) if max_amount is not None else None
 
     def record(amount, popup_shown, outcome, latency_ms, error_text=None, row_id=""):
         db.add_click({"run_id": run_id, "row_id": row_id, "amount": str(amount), "timestamp": utc_now(),
@@ -399,97 +415,173 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
             _ensure_logged_in(page, config)
             _close_any_dialog(page)
             _close_chat_toast(page)
-            rows = [(i, a) for i, a in _visible_rows(page)
-                    if (min_amount is None or a >= min_amount) and (max_amount is None or a <= max_amount)]
-            if not rows:
-                if stop_event.wait(0.025):
-                    break
-                # Click in-page "Refresh list" button every 1.5 seconds if no matching orders exist
-                if time.monotonic() - last_refresh[0] >= 1.5:
-                    last_refresh[0] = time.monotonic()
-                    _refresh_list(page)
-                continue
 
-            idx, amount = rows[0]
             cooldown = max(0.01, (config.get("delay_ms") or 50) / 1000.0)
             gap = cooldown - (time.monotonic() - last_click[0])
             if gap > 0 and stop_event.wait(gap):
                 break
-            seq += 1
-            last_click[0] = time.monotonic()
+
             started = time.perf_counter()
             popup_shown = False
+            amount = Decimal(0)
+            row_id = ""
             try:
                 accept_resp.clear()
 
-                # TURBO IN-BROWSER INSTANT CLICK & 5ms MODAL CONFIRM
-                turbo = page.evaluate("""([targetIdx]) => {
-                    return new Promise((resolve) => {
-                        const rows = [...document.querySelectorAll('tr, [role="row"]')];
-                        let btn = null;
-                        for (const tr of rows) {
-                            const t = tr.innerText || '';
-                            if (/accepted by another trader/i.test(t)) continue;
-                            const b = tr.querySelector('[automation-id="autotest_button_tradeAccept"]') ||
-                                      [...tr.querySelectorAll('button')].find(x => /accept\\s*(for\\s*processing)?/i.test(x.innerText || ''));
-                            if (b && !b.disabled && b.offsetParent !== null) {
-                                btn = b;
+                # ATOMIC SCAN, EXACT ROW AMOUNT VERIFICATION & 5ms CONFIRM CLICK
+                turbo = page.evaluate("""([minAmt, maxAmt]) => {
+                    function isAcceptButton(b) {
+                        if (!b || b.disabled) return false;
+                        if (b.classList && b.classList.contains('tui-button_disabled')) return false;
+                        const autoId = b.getAttribute('automation-id') || '';
+                        const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        if (text.includes('another trader') || text.includes('accepted by') || text.includes('too late') || text.includes('expired')) {
+                            return false;
+                        }
+                        if (autoId === 'autotest_button_tradeAccept') return true;
+                        return text === 'accept for processing' || text === 'accept';
+                    }
+
+                    function parseAmount(tr) {
+                        const text = tr.innerText || tr.textContent || '';
+                        const m = text.match(/([\\d][\\d\\s\\u00a0\\u202f.,]*)\\s*INR/i);
+                        if (!m) return null;
+                        const clean = m[1].replace(/[\\s\\u00a0\\u202f,]/g, '');
+                        const val = parseFloat(clean);
+                        return isNaN(val) ? null : val;
+                    }
+
+                    function extractRowId(tr) {
+                        const cells = tr.querySelectorAll('td, th, [role="cell"]');
+                        if (cells.length > 0) {
+                            return (cells[0].innerText || cells[0].textContent || '').trim().replace(/\\n/g, ' ');
+                        }
+                        return '';
+                    }
+
+                    // 1. Scan rows
+                    const rows = [...document.querySelectorAll('tr, [role="row"]')];
+                    let target = null;
+
+                    for (const tr of rows) {
+                        const text = (tr.innerText || '').toLowerCase();
+                        if (text.includes('accepted by another trader')) continue;
+
+                        const btns = tr.querySelectorAll('button, a[role="button"]');
+                        let acceptBtn = null;
+                        for (const b of btns) {
+                            if (isAcceptButton(b) && b.offsetParent !== null) {
+                                acceptBtn = b;
                                 break;
                             }
                         }
-                        if (!btn) {
-                            btn = document.querySelector('[automation-id="autotest_button_tradeAccept"]');
+                        if (!acceptBtn) {
+                            const autoBtn = tr.querySelector('[automation-id="autotest_button_tradeAccept"]');
+                            if (autoBtn && isAcceptButton(autoBtn) && autoBtn.offsetParent !== null) {
+                                acceptBtn = autoBtn;
+                            }
                         }
-                        if (!btn) {
-                            resolve({ clicked: false, error: 'no_accept_button' });
-                            return;
-                        }
+                        if (!acceptBtn) continue;
 
-                        // Click Accept button immediately
-                        btn.click();
-                        const start = performance.now();
+                        const amt = parseAmount(tr);
+                        if (amt === null) continue;
 
-                        // Micro-interval (5ms) to catch and confirm dialog instantaneously
+                        // Min/Max filter check on the exact row
+                        if (minAmt !== null && amt < minAmt) continue;
+                        if (maxAmt !== null && amt > maxAmt) continue;
+
+                        target = {
+                            btn: acceptBtn,
+                            amount: amt,
+                            row_id: extractRowId(tr)
+                        };
+                        break;
+                    }
+
+                    if (!target) {
+                        return Promise.resolve({ clicked: false, reason: 'no_matching_row' });
+                    }
+
+                    // 2. Click the matching button immediately
+                    target.btn.click();
+                    const start = performance.now();
+
+                    // 3. High-frequency 5ms loop to confirm modal immediately
+                    return new Promise((resolve) => {
                         const timer = setInterval(() => {
                             const elapsed = performance.now() - start;
 
-                            // 1. Check for confirm button in dialog
                             const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
-                                               [...document.querySelectorAll('section[role="dialog"] button')].find(b => /accept|confirm/i.test(b.innerText || ''));
+                                               [...document.querySelectorAll('section[role="dialog"] button')].find(b => {
+                                                   const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                                   return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
+                                               });
                             if (confirmBtn && !confirmBtn.disabled && confirmBtn.offsetParent !== null) {
                                 clearInterval(timer);
                                 confirmBtn.click();
-                                resolve({ clicked: true, confirmed: true, popup_shown: true, elapsed_ms: Math.round(elapsed) });
+                                resolve({
+                                    clicked: true,
+                                    amount: target.amount,
+                                    row_id: target.row_id,
+                                    confirmed: true,
+                                    popup_shown: true,
+                                    elapsed_ms: Math.round(elapsed)
+                                });
                                 return;
                             }
 
-                            // 2. Check if another trader took it
                             const dialog = document.querySelector('section[role="dialog"]:not(.hidden)');
                             if (dialog) {
                                 const dText = (dialog.innerText || '').toLowerCase();
                                 if (dText.includes('another trader') || dText.includes('too late') || dText.includes('expired')) {
                                     clearInterval(timer);
-                                    resolve({ clicked: true, confirmed: false, popup_shown: true, taken_by_other: true, elapsed_ms: Math.round(elapsed) });
+                                    resolve({
+                                        clicked: true,
+                                        amount: target.amount,
+                                        row_id: target.row_id,
+                                        confirmed: false,
+                                        popup_shown: true,
+                                        taken_by_other: true,
+                                        elapsed_ms: Math.round(elapsed)
+                                    });
                                     return;
                                 }
                             }
 
                             if (elapsed > 3500) {
                                 clearInterval(timer);
-                                resolve({ clicked: true, confirmed: false, popup_shown: !!dialog, timeout: true, elapsed_ms: Math.round(elapsed) });
+                                resolve({
+                                    clicked: true,
+                                    amount: target.amount,
+                                    row_id: target.row_id,
+                                    confirmed: false,
+                                    popup_shown: !!dialog,
+                                    timeout: true,
+                                    elapsed_ms: Math.round(elapsed)
+                                });
                             }
                         }, 5);
                     });
-                }""", [idx])
+                }""", [min_amt_f, max_amt_f])
 
                 if not turbo.get("clicked"):
-                    lat = round((time.perf_counter() - started) * 1000)
-                    record(amount, False, "FAIL", lat, turbo.get("error", "Accept button not clickable"))
+                    # No matching eligible orders in table right now
+                    if stop_event.wait(0.025):
+                        break
+                    # Click in-page "Refresh list" button every 1.5 seconds if no matching orders exist
+                    if time.monotonic() - last_refresh[0] >= 1.5:
+                        last_refresh[0] = time.monotonic()
+                        _refresh_list(page)
                     continue
+
+                seq += 1
+                last_click[0] = time.monotonic()
+                amount = Decimal(str(turbo["amount"]))
+                row_id = turbo.get("row_id", "")
 
                 if turbo.get("taken_by_other"):
                     lat = round((time.perf_counter() - started) * 1000)
-                    record(amount, True, "TAKEN_BY_OTHER", lat)
+                    record(amount, True, "TAKEN_BY_OTHER", lat, row_id=row_id)
                     _close_any_dialog(page)
                     continue
 
@@ -531,7 +623,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         _failure_screenshot(page, str(Path(screenshot_dir) / f"{run_id}_{seq}.png"), config)
                     except Exception:
                         pass
-                record(amount, True, outcome, lat, err)
+                record(amount, True, outcome, lat, err, row_id=row_id)
                 if outcome == "RATE_LIMITED":
                     _close_any_dialog(page)
                     consecutive_429[0] += 1
@@ -562,7 +654,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         break
             except Exception as exc:
                 lat = round((time.perf_counter() - started) * 1000)
-                record(amount, popup_shown, "FAIL", lat, _redact(str(exc), config).replace("\n", " ")[:600])
+                record(amount, popup_shown, "FAIL", lat, _redact(str(exc), config).replace("\n", " ")[:600], row_id=row_id)
                 try:
                     _failure_screenshot(page, str(Path(screenshot_dir) / f"{run_id}_{seq}.png"), config)
                 except Exception:
