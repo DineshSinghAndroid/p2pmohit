@@ -42,3 +42,8 @@
 .switch input:checked + .slider{background-color:var(--mint)!important}
 .switch input:checked + .slider:before{transform:translateX(24px);background-color:#042116}
 
+#proxy-select{background:#121820!important;color:#ffffff!important;border:1px solid rgba(255,255,255,0.25)!important}
+#proxy-select option{background:#121820!important;color:#ffffff!important;padding:8px 10px}
+#proxy-select option:checked{background:#1a2b25!important;color:#52e3a8!important}
+
+
