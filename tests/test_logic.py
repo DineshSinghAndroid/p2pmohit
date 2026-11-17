@@ -11,6 +11,11 @@ from app.worker import _read_rows
     ("1\u00a0145,70 INR", Decimal("1145.70")),
     ("₹ 12,500.25", Decimal("12500.25")),
     ("2.345,10 INR", Decimal("2345.10")),
+    ("50 000 INR", Decimal("50000")),
+    ("6 000 INR", Decimal("6000")),
+    ("8 000 INR", Decimal("8000")),
+    ("25 000 INR", Decimal("25000")),
+    ("5 353 INR", Decimal("5353")),
     ("not an amount", None),
 ])
 def test_parse_amount_inr(value, expected):
