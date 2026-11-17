@@ -47,13 +47,13 @@
 </div>
 <div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
 <span class="eyebrow">EMPTY TABLE REFRESH</span>
-<h3 style="margin:8px 0 4px;font-size:18px;color:#7bd7fb;">3.0 Seconds</h3>
-<p style="margin:0;font-size:11px;color:var(--muted);">Auto-refreshes list if no matching orders exist in range.</p>
+<h3 style="margin:8px 0 4px;font-size:18px;color:#7bd7fb;">1.5 Seconds</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">Rapid refresh (1-2s) when no matching orders exist in range.</p>
 </div>
 <div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:8px;">
 <span class="eyebrow">429 RATE LIMIT COOLDOWN</span>
-<h3 style="margin:8px 0 4px;font-size:18px;color:#f5c86c;">Auto (5s - 30s)</h3>
-<p style="margin:0;font-size:11px;color:var(--muted);">Keeps Chrome open and resumes automatically after backoff.</p>
+<h3 style="margin:8px 0 4px;font-size:18px;color:#f5c86c;">x2 Backoff (2s → 4s → 8s...)</h3>
+<p style="margin:0;font-size:11px;color:var(--muted);">Multiplies by 2 on repeat 429, then automatically resumes.</p>
 </div>
 </div>
 </section>

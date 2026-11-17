@@ -261,18 +261,18 @@ def _refresh_list(page):
     try:
         refresh = page.get_by_role("button", name=re.compile(r"Refresh list", re.IGNORECASE))
         if refresh.count() and refresh.first.is_visible():
-            refresh.first.click(timeout=3_000)
-            page.wait_for_load_state("domcontentloaded", timeout=5_000)
-            page.wait_for_timeout(500)
+            refresh.first.click(timeout=1_500, no_wait_after=True)
+            page.wait_for_timeout(100)
             return True
     except Exception:
         pass
     try:
-        page.reload(wait_until="domcontentloaded", timeout=15_000)
-        page.wait_for_timeout(500)
+        page.reload(wait_until="domcontentloaded", timeout=10_000)
+        page.wait_for_timeout(100)
         return True
     except Exception:
         return False
+
 
 
 def _next_page(page) -> bool:
@@ -373,6 +373,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
     seq = 0
     last_click = [0.0]
     last_refresh = [time.monotonic()]
+    consecutive_429 = [0]
 
     def record(amount, popup_shown, outcome, latency_ms, error_text=None, row_id=""):
         db.add_click({"run_id": run_id, "row_id": row_id, "amount": str(amount), "timestamp": utc_now(),
@@ -387,14 +388,15 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
             rows = [(i, a) for i, a in _visible_rows(page)
                     if (min_amount is None or a >= min_amount) and (max_amount is None or a <= max_amount)]
             if not rows:
-                if stop_event.wait(0.25):
+                if stop_event.wait(0.1):
                     break
-                if time.monotonic() - last_refresh[0] >= 3.0:
+                # Refresh list every 1.5 seconds if no matching orders exist
+                if time.monotonic() - last_refresh[0] >= 1.5:
                     last_refresh[0] = time.monotonic()
                     _refresh_list(page)
                 continue
             idx, amount = rows[0]          # always work the first in-range row, then re-read
-            cooldown = max(0.1, (config.get("delay_ms") or 500) / 1000.0)
+            cooldown = max(0.01, (config.get("delay_ms") or 50) / 1000.0)
             gap = cooldown - (time.monotonic() - last_click[0])
             if gap > 0 and stop_event.wait(gap):
                 break
@@ -404,7 +406,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
             popup_shown = False
             try:
                 btn = page.locator(ACCEPT_SEL).nth(idx)
-                btn.click(timeout=4_000)
+                btn.click(timeout=2_000, no_wait_after=True)
                 try:
                     page.locator('section[role="dialog"]:visible').first.wait_for(timeout=MODAL_TIMEOUT_MS)
                     popup_shown = True
@@ -427,13 +429,13 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 accept_resp.clear()
                 confirm = page.locator(CONFIRM_SEL).first
                 try:
-                    confirm.wait_for(state="visible", timeout=4_000)
-                    confirm.click(timeout=4_000)
+                    confirm.wait_for(state="visible", timeout=2_000)
+                    confirm.click(timeout=1_500, no_wait_after=True)
                 except Exception:
                     try:
-                        confirm.click(timeout=2_000, force=True)    # fallback: click even if an overlay claims the spot
+                        confirm.click(timeout=1_000, force=True, no_wait_after=True)
                     except Exception:
-                        confirm.evaluate("e => e.click()")           # last resort: DOM click
+                        confirm.evaluate("e => e.click()")
                 outcome = None
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline and not stop_event.is_set():
@@ -452,7 +454,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         outcome, err = "SKIPPED", txt[:60].replace("\n", " "); break
                     if status is not None and status < 400 and not txt:
                         outcome, err = "ACCEPTED", None; break
-                    time.sleep(0.15)
+                    time.sleep(0.025)
                 lat = round((time.perf_counter() - started) * 1000)
                 if outcome is None:
                     outcome, err = "FAIL", "Confirm clicked but no result within 10s"
@@ -463,13 +465,22 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 record(amount, True, outcome, lat, err)
                 if outcome == "RATE_LIMITED":
                     _close_any_dialog(page)
-                    wait_s = max(5.0, _retry_after_seconds(retry_after))
-                    db.update_run(run_id, "running", error_text=f"Rate limited (429). Pausing for {int(wait_s)}s before retry...")
+                    consecutive_429[0] += 1
+                    # 2s -> 4s -> 8s -> 16s... (2 * 2^(count-1))
+                    exp_wait = 2.0 * (2 ** (consecutive_429[0] - 1))
+                    exp_wait = min(exp_wait, 64.0)
+                    server_wait = _retry_after_seconds(retry_after)
+                    wait_s = max(exp_wait, server_wait)
+                    db.update_run(run_id, "running", error_text=f"Rate limited (429 #{consecutive_429[0]}). Waiting {int(wait_s)}s (x2 backoff) before auto-retry...")
                     last_click[0] = time.monotonic() + wait_s
+                    last_refresh[0] = time.monotonic() + wait_s
                     if stop_event.wait(wait_s):
                         break
                     db.update_run(run_id, "running", error_text=None)
                     continue
+                else:
+                    consecutive_429[0] = 0
+
                 _close_any_dialog(page)
                 last_refresh[0] = time.monotonic()
                 if outcome == "ACCEPTED":
@@ -479,7 +490,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     last_refresh[0] = time.monotonic()
                     last_click[0] = time.monotonic()
                 elif outcome == "LIMIT_REACHED":
-                    if stop_event.wait(3.0):
+                    if stop_event.wait(2.0):
                         break
             except Exception as exc:
                 lat = round((time.perf_counter() - started) * 1000)
@@ -490,7 +501,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     pass
                 _close_any_dialog(page)
         except Exception:
-            if stop_event.wait(2.0):
+            if stop_event.wait(1.0):
                 break
 
 
