@@ -259,19 +259,20 @@ def _watch_counts(page, state):
 
 def _refresh_list(page):
     try:
-        refresh = page.get_by_role("button", name=re.compile(r"Refresh list", re.IGNORECASE))
-        if refresh.count() and refresh.first.is_visible():
-            refresh.first.click(timeout=1_500, no_wait_after=True)
-            page.wait_for_timeout(100)
+        refreshed = page.evaluate("""() => {
+            const btns = [...document.querySelectorAll('button')];
+            const ref = btns.find(b => /refresh\\s*list/i.test(b.innerText || b.textContent || ''));
+            if (ref && !ref.disabled && ref.offsetParent !== null) {
+                ref.click();
+                return true;
+            }
+            return false;
+        }""")
+        if refreshed:
             return True
     except Exception:
         pass
-    try:
-        page.reload(wait_until="domcontentloaded", timeout=10_000)
-        page.wait_for_timeout(100)
-        return True
-    except Exception:
-        return False
+    return False
 
 
 
@@ -334,16 +335,29 @@ def _close_any_dialog(page) -> None:
 
 
 def _visible_rows(page):
-    """Rows on the current page that have an Accept button, as (index, amount)."""
+    """Rows on the current page that have an active Accept button, as (index, amount)."""
     out = []
     try:
-        data = page.evaluate("""(sel) => [...document.querySelectorAll(sel)].map((b, i) => {
-            const tr = b.closest('tr'); return {i, t: tr ? tr.innerText : ''}; })""", ACCEPT_SEL)
+        data = page.evaluate("""() => {
+            const out = [];
+            const rows = document.querySelectorAll('tr, [role="row"]');
+            rows.forEach((tr, idx) => {
+                const text = tr.innerText || '';
+                if (/accepted by another trader/i.test(text)) return;
+                const btn = tr.querySelector('[automation-id="autotest_button_tradeAccept"]') ||
+                            [...tr.querySelectorAll('button')].find(b => /accept\\s*(for\\s*processing)?/i.test(b.innerText || ''));
+                if (!btn || btn.disabled || btn.offsetParent === null) return;
+                const m = text.match(/([\\d][\\d\\s\\u00a0\\u202f.,]*)\\s*INR/i);
+                if (m) {
+                    out.push({ i: idx, amt_str: m[1] });
+                }
+            });
+            return out;
+        }""")
     except Exception:
         return out
     for d in data:
-        m = re.search(r"([\d][\d\s\u00a0\u202f.,]*)\s*INR", d["t"])
-        amt = parse_amount_inr(m.group(1).strip() + " INR") if m else None
+        amt = parse_amount_inr(d.get("amt_str", "") + " INR")
         if amt is not None:
             out.append((d["i"], amt))
     return out
@@ -388,14 +402,15 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
             rows = [(i, a) for i, a in _visible_rows(page)
                     if (min_amount is None or a >= min_amount) and (max_amount is None or a <= max_amount)]
             if not rows:
-                if stop_event.wait(0.1):
+                if stop_event.wait(0.025):
                     break
-                # Refresh list every 1.5 seconds if no matching orders exist
+                # Click in-page "Refresh list" button every 1.5 seconds if no matching orders exist
                 if time.monotonic() - last_refresh[0] >= 1.5:
                     last_refresh[0] = time.monotonic()
                     _refresh_list(page)
                 continue
-            idx, amount = rows[0]          # always work the first in-range row, then re-read
+
+            idx, amount = rows[0]
             cooldown = max(0.01, (config.get("delay_ms") or 50) / 1000.0)
             gap = cooldown - (time.monotonic() - last_click[0])
             if gap > 0 and stop_event.wait(gap):
@@ -405,59 +420,113 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
             started = time.perf_counter()
             popup_shown = False
             try:
-                btn = page.locator(ACCEPT_SEL).nth(idx)
-                btn.click(timeout=2_000, no_wait_after=True)
-                try:
-                    page.locator('section[role="dialog"]:visible').first.wait_for(timeout=MODAL_TIMEOUT_MS)
-                    popup_shown = True
-                except Exception:
-                    pass
-                lat = round((time.perf_counter() - started) * 1000)
-                if not popup_shown:
-                    record(amount, False, "FAIL", lat, "No popup appeared after Accept for processing")
+                accept_resp.clear()
+
+                # TURBO IN-BROWSER INSTANT CLICK & 5ms MODAL CONFIRM
+                turbo = page.evaluate("""([targetIdx]) => {
+                    return new Promise((resolve) => {
+                        const rows = [...document.querySelectorAll('tr, [role="row"]')];
+                        let btn = null;
+                        for (const tr of rows) {
+                            const t = tr.innerText || '';
+                            if (/accepted by another trader/i.test(t)) continue;
+                            const b = tr.querySelector('[automation-id="autotest_button_tradeAccept"]') ||
+                                      [...tr.querySelectorAll('button')].find(x => /accept\\s*(for\\s*processing)?/i.test(x.innerText || ''));
+                            if (b && !b.disabled && b.offsetParent !== null) {
+                                btn = b;
+                                break;
+                            }
+                        }
+                        if (!btn) {
+                            btn = document.querySelector('[automation-id="autotest_button_tradeAccept"]');
+                        }
+                        if (!btn) {
+                            resolve({ clicked: false, error: 'no_accept_button' });
+                            return;
+                        }
+
+                        // Click Accept button immediately
+                        btn.click();
+                        const start = performance.now();
+
+                        // Micro-interval (5ms) to catch and confirm dialog instantaneously
+                        const timer = setInterval(() => {
+                            const elapsed = performance.now() - start;
+
+                            // 1. Check for confirm button in dialog
+                            const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
+                                               [...document.querySelectorAll('section[role="dialog"] button')].find(b => /accept|confirm/i.test(b.innerText || ''));
+                            if (confirmBtn && !confirmBtn.disabled && confirmBtn.offsetParent !== null) {
+                                clearInterval(timer);
+                                confirmBtn.click();
+                                resolve({ clicked: true, confirmed: true, popup_shown: true, elapsed_ms: Math.round(elapsed) });
+                                return;
+                            }
+
+                            // 2. Check if another trader took it
+                            const dialog = document.querySelector('section[role="dialog"]:not(.hidden)');
+                            if (dialog) {
+                                const dText = (dialog.innerText || '').toLowerCase();
+                                if (dText.includes('another trader') || dText.includes('too late') || dText.includes('expired')) {
+                                    clearInterval(timer);
+                                    resolve({ clicked: true, confirmed: false, popup_shown: true, taken_by_other: true, elapsed_ms: Math.round(elapsed) });
+                                    return;
+                                }
+                            }
+
+                            if (elapsed > 3500) {
+                                clearInterval(timer);
+                                resolve({ clicked: true, confirmed: false, popup_shown: !!dialog, timeout: true, elapsed_ms: Math.round(elapsed) });
+                            }
+                        }, 5);
+                    });
+                }""", [idx])
+
+                if not turbo.get("clicked"):
+                    lat = round((time.perf_counter() - started) * 1000)
+                    record(amount, False, "FAIL", lat, turbo.get("error", "Accept button not clickable"))
                     continue
-                text = _visible_dialog_text(page).casefold()
-                if "accepted by another trader" in text:
+
+                if turbo.get("taken_by_other"):
+                    lat = round((time.perf_counter() - started) * 1000)
                     record(amount, True, "TAKEN_BY_OTHER", lat)
                     _close_any_dialog(page)
                     continue
-                if "accept the request for processing" not in text:
-                    # late / expired / any other dialog: close with top-right X, count as skipped
-                    record(amount, True, "SKIPPED", lat, "Other dialog: " + text[:60].replace("\n", " "))
-                    _close_any_dialog(page)
-                    continue
-                accept_resp.clear()
-                confirm = page.locator(CONFIRM_SEL).first
-                try:
-                    confirm.wait_for(state="visible", timeout=2_000)
-                    confirm.click(timeout=1_500, no_wait_after=True)
-                except Exception:
-                    try:
-                        confirm.click(timeout=1_000, force=True, no_wait_after=True)
-                    except Exception:
-                        confirm.evaluate("e => e.click()")
+
+                # Confirm was fired within 5ms — now evaluate server response
                 outcome = None
-                deadline = time.monotonic() + 10
+                err = None
+                deadline = time.monotonic() + 8.0
                 while time.monotonic() < deadline and not stop_event.is_set():
                     txt = _visible_dialog_text(page).casefold()
                     limited = next((item for item in accept_resp if item[0] == 429), None)
                     status, body, retry_after = limited or (accept_resp[-1] if accept_resp else (None, "", None))
                     if status == 424 and "MAX_SIMULTANEOUS" in body:
-                        outcome, err = "LIMIT_REACHED", "Max simultaneous orders reached"; break
+                        outcome, err = "LIMIT_REACHED", "Max simultaneous orders reached"
+                        break
                     if status == 429:
-                        outcome, err = "RATE_LIMITED", body; break
+                        outcome, err = "RATE_LIMITED", body
+                        break
+                    if status == 424 and ("ALREADY_PROCESSED" in body or "already processed" in body.lower()):
+                        outcome, err = "TAKEN_BY_OTHER", "Accepted by another trader (424)"
+                        break
                     if status is not None and status >= 400:
-                        outcome, err = "SKIPPED", f"HTTP {status}: {body[:80]}"; break
+                        outcome, err = "SKIPPED", f"HTTP {status}: {body[:80]}"
+                        break
                     if "processing of the request" in txt or "make and confirm" in txt:
-                        outcome, err = "ACCEPTED", None; break
+                        outcome, err = "ACCEPTED", None
+                        break
                     if "accepted by another trader" in txt or "time has expired" in txt or "too late" in txt:
-                        outcome, err = "SKIPPED", txt[:60].replace("\n", " "); break
+                        outcome, err = "TAKEN_BY_OTHER", txt[:60].replace("\n", " ")
+                        break
                     if status is not None and status < 400 and not txt:
-                        outcome, err = "ACCEPTED", None; break
-                    time.sleep(0.025)
+                        outcome, err = "ACCEPTED", None
+                        break
+                    time.sleep(0.015)
+
                 lat = round((time.perf_counter() - started) * 1000)
                 if outcome is None:
-                    outcome, err = "FAIL", "Confirm clicked but no result within 10s"
+                    outcome, err = "FAIL", "Confirm clicked but no result within 8s"
                     try:
                         _failure_screenshot(page, str(Path(screenshot_dir) / f"{run_id}_{seq}.png"), config)
                     except Exception:
@@ -478,9 +547,8 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         break
                     db.update_run(run_id, "running", error_text=None)
                     continue
-                else:
-                    consecutive_429[0] = 0
 
+                consecutive_429[0] = 0
                 _close_any_dialog(page)
                 last_refresh[0] = time.monotonic()
                 if outcome == "ACCEPTED":
@@ -682,10 +750,7 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                 status = "stopped"
             else:
                 page.goto(f"{root}/payouts", wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(700)
-                rows_deadline = time.monotonic() + 30
-                while not _read_rows(page) and time.monotonic() < rows_deadline and not stop_event.is_set():
-                    page.wait_for_timeout(300)
+                page.wait_for_timeout(500)
                 _close_chat_toast(page)
                 _dismiss_blocking_dialogs(page)
                 min_amount = Decimal(config["min_amount"]) if config.get("min_amount") else None
