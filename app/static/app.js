@@ -137,36 +137,167 @@ document.querySelectorAll('.nav-tab').forEach(btn => {
 })();
 
 ;(function(){
-  // ---- sound + vibration + notification when an order gets ACCEPTED ----
-  let ctx=null,lastAcc=0,primed=false;
+  // ---- Mobile ServiceWorker + Notification + Audio + Vibration engine ----
+  let ctx=null,lastAcc=0,primed=false,swReg=null;
   const on=()=>{const c=document.querySelector('#sound-on');return !c||c.checked};
-  function unlock(){ // browsers need one tap before audio/notifications work
-    if(primed)return;primed=true;
-    try{ctx=new (window.AudioContext||window.webkitAudioContext)();ctx.resume()}catch(_){}
-    try{if('Notification' in window&&Notification.permission==='default')Notification.requestPermission()}catch(_){}
+
+  // Register service worker (mandatory for Android notifications)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').then(reg => {
+      swReg = reg;
+    }).catch(err => console.log('SW reg error', err));
   }
-  ['click','touchstart','keydown'].forEach(e=>document.addEventListener(e,unlock,{once:false,passive:true}));
-  function beep(){
-    try{ if(!ctx)return; const t=ctx.currentTime;
-      [880,1175].forEach((f,i)=>{const o=ctx.createOscillator(),g=ctx.createGain();o.type='sine';o.frequency.value=f;
-        g.gain.setValueAtTime(0.0001,t+i*0.16);g.gain.exponentialRampToValueAtTime(0.4,t+i*0.16+0.02);g.gain.exponentialRampToValueAtTime(0.0001,t+i*0.16+0.15);
-        o.connect(g);g.connect(ctx.destination);o.start(t+i*0.16);o.stop(t+i*0.16+0.16)});
-    }catch(_){}
+
+  function getAudioCtx() {
+    if (!ctx) {
+      try {
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (_) {}
+    }
+    if (ctx && ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    return ctx;
   }
-  function alertUser(n,total){
-    if(!on())return;
+
+  function unlock() {
+    if (primed) return;
+    primed = true;
+    getAudioCtx();
+  }
+  ['click', 'touchstart', 'keydown'].forEach(e => document.addEventListener(e, unlock, { once: false, passive: true }));
+
+  function beep() {
+    try {
+      const audio = getAudioCtx();
+      if (!audio) return;
+      const t = audio.currentTime;
+      [880, 1175, 1400].forEach((f, i) => {
+        const o = audio.createOscillator(), g = audio.createGain();
+        o.type = 'sine';
+        o.frequency.value = f;
+        g.gain.setValueAtTime(0.001, t + i * 0.14);
+        g.gain.exponentialRampToValueAtTime(0.6, t + i * 0.14 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.14 + 0.13);
+        o.connect(g);
+        g.connect(audio.destination);
+        o.start(t + i * 0.14);
+        o.stop(t + i * 0.14 + 0.14);
+      });
+    } catch (_) {}
+  }
+
+  function updatePermUI() {
+    const s = document.querySelector('#notif-perm-status');
+    const b1 = document.querySelector('#btn-enable-notif');
+    const b2 = document.querySelector('#btn-request-perm');
+    if (!('Notification' in window)) {
+      if (s) { s.textContent = 'Not Supported'; s.style.color = '#f5c86c'; }
+      if (b1) b1.style.display = 'none';
+      if (b2) { b2.textContent = 'Notifications Not Supported'; b2.disabled = true; }
+      return;
+    }
+    const perm = Notification.permission;
+    if (perm === 'granted') {
+      if (s) { s.textContent = 'Active (Allowed) ✓'; s.style.color = 'var(--mint)'; }
+      if (b1) { b1.textContent = '🔔 Alerts Active ✓'; b1.style.borderColor = 'var(--mint)'; }
+      if (b2) { b2.textContent = 'Notifications Active ✓'; b2.disabled = true; b2.style.opacity = '0.7'; }
+    } else if (perm === 'denied') {
+      if (s) { s.textContent = 'Blocked in Browser Settings'; s.style.color = 'var(--red)'; }
+      if (b1) { b1.textContent = '⚠ Alerts Blocked'; b1.style.borderColor = 'var(--red)'; b1.style.color = 'var(--red)'; }
+      if (b2) { b2.textContent = 'Blocked by Browser'; b2.disabled = true; }
+    } else {
+      if (s) { s.textContent = 'Permission Required'; s.style.color = '#f5c86c'; }
+      if (b1) { b1.textContent = '🔔 Enable Phone Alerts'; }
+      if (b2) { b2.textContent = '🔔 Enable Notifications'; b2.disabled = false; }
+    }
+  }
+
+  async function requestPermission() {
+    getAudioCtx();
+    if (!('Notification' in window)) {
+      alert('This mobile browser does not support Web Notifications.');
+      return;
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      updatePermUI();
+      if (perm === 'granted') {
+        beep();
+        showNotification('🔔 Notifications Enabled!', 'You will be alerted immediately when an order is accepted.');
+      }
+    } catch (e) {
+      console.log('Perm error', e);
+    }
+  }
+
+  function showNotification(title, body) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const options = {
+      body: body,
+      tag: 'payout-accept-' + Date.now(),
+      renotify: true,
+      vibrate: [300, 100, 300, 100, 300]
+    };
+    if (swReg && swReg.showNotification) {
+      swReg.showNotification(title, options).catch(() => {
+        try { new Notification(title, options); } catch (_) {}
+      });
+    } else if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+      navigator.serviceWorker.ready.then(reg => reg.showNotification(title, options)).catch(() => {
+        try { new Notification(title, options); } catch (_) {}
+      });
+    } else {
+      try { new Notification(title, options); } catch (_) {}
+    }
+  }
+
+  function alertUser(n, total) {
+    if (!on()) return;
     beep();
-    try{navigator.vibrate&&navigator.vibrate([200,80,200])}catch(_){}
-    try{if('Notification' in window&&Notification.permission==='granted')new Notification('Order accepted',{body:'Accepted so far: '+total})}catch(_){}
-    document.title='✅ '+total+' accepted';
+    try { navigator.vibrate && navigator.vibrate([300, 120, 300, 120, 400]); } catch (_) {}
+    showNotification('✅ Order ACCEPTED!', 'Total accepted so far: ' + total);
+    document.title = '✅ ' + total + ' accepted';
   }
-  function poll(){
-    const el=document.querySelector('#stat-accepted'); if(!el)return;
-    const v=parseInt(el.textContent,10)||0;
-    if(v>lastAcc&&lastAcc>=0&&primed!==null){ if(v>lastAcc)alertUser(v-lastAcc,v) }
-    lastAcc=v;
+
+  function poll() {
+    const el = document.querySelector('#stat-accepted');
+    if (!el) return;
+    const v = parseInt(el.textContent, 10) || 0;
+    if (v > lastAcc && lastAcc >= 0 && primed !== null) {
+      alertUser(v - lastAcc, v);
+    }
+    lastAcc = v;
   }
-  setInterval(poll,700);
+  setInterval(poll, 700);
+
+  // Wire buttons
+  function wireNotifButtons() {
+    updatePermUI();
+    const b1 = document.querySelector('#btn-enable-notif');
+    const b2 = document.querySelector('#btn-request-perm');
+    const bTest = document.querySelector('#btn-test-notif');
+    if (b1) b1.addEventListener('click', requestPermission);
+    if (b2) b2.addEventListener('click', requestPermission);
+    if (bTest) bTest.addEventListener('click', () => {
+      getAudioCtx();
+      beep();
+      try { navigator.vibrate && navigator.vibrate([300, 100, 300]); } catch (_) {}
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        showNotification('⚡ Test Alert Working!', 'Your phone will ring, vibrate, and notify you when orders are accepted.');
+      } else {
+        requestPermission();
+      }
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wireNotifButtons);
+  } else {
+    wireNotifButtons();
+  }
+
   // reset baseline when a new run starts so old counts don't ring
-  document.addEventListener('click',e=>{if(e.target&&e.target.closest&&e.target.closest('#start-run'))lastAcc=0});
+  document.addEventListener('click', e => {
+    if (e.target && e.target.closest && e.target.closest('#start-run')) lastAcc = 0;
+  });
 })();

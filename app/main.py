@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
@@ -96,6 +96,12 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 @app.get("/", response_class=HTMLResponse)
 def index():
     return (BASE_DIR / "app" / "static" / "index.html").read_text()
+
+
+@app.get("/sw.js")
+def service_worker():
+    sw_file = BASE_DIR / "app" / "static" / "sw.js"
+    return FileResponse(sw_file, media_type="application/javascript", headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
 
 
 @app.post("/api/login")
