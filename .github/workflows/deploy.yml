@@ -1,0 +1,26 @@
+name: Deploy to AWS Lightsail
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync code to Lightsail and Rebuild
+        uses: easingthemes/ssh-deploy@v5.1.0
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          REMOTE_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          REMOTE_USER: ubuntu
+          TARGET: /home/ubuntu/app
+          EXCLUDE: "/.git/, /.github/, /local-data/, /.venv/, /__pycache__/"
+          SCRIPT_AFTER: |
+            cd /home/ubuntu/app
+            sudo docker compose up -d --build
