@@ -23,9 +23,10 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           echo "" >> ~/.ssh/id_rsa
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-          rsync -avz --delete \
+          rsync -avz \
             --exclude='.git/' \
             --exclude='.github/' \
+            --exclude='data/' \
             --exclude='local-data/' \
             --exclude='.venv/' \
             --exclude='__pycache__/' \
