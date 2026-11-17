@@ -21,8 +21,30 @@ function updateHistoryStatus(run) {
 
 async function refreshRun(id){try{const response=await api(`/api/runs/${id}`),{stats,clicks,run}=await response.json();
   updateHistoryStatus(run);if(id===activeRunId&&run.status!=='running'){clearInterval(timer);timer=null;activeRunId=null;setRunning(false);loadHistory()}if(id!==selectedRunId)return;$('#stat-total').textContent=stats.total_clicks;$('#stat-accepted').textContent=stats.accepted+stats.otp_reached;$('#stat-skipped').textContent=stats.skipped+stats.limit_reached;$('#stat-rate').textContent=stats.rate_limited||0;$('#stat-failures').textContent=stats.failures;$('#failure-breakdown').textContent=Object.entries(stats.failure_reasons).map(([reason,count])=>`${count}× ${reason}`).join(' · ')||'No failure reasons';$('#stat-latency').textContent=`${stats.avg_latency_ms} / ${stats.p95_latency_ms}`;$('#click-count').textContent=clicks.length;$('#clicks-body').innerHTML=clicks.length?clicks.map(click=>{const isAcc=click.outcome==='ACCEPTED'||click.outcome==='OTP_REACHED';return `<tr class="${isAcc?'row-accepted':''}"><td>${escapeHtml(new Date(click.timestamp).toLocaleTimeString())}</td><td>${escapeHtml(click.row_id)}</td><td>₹${escapeHtml(click.amount)}</td><td>${click.popup_shown?'YES':'NO'}</td><td><span class="outcome ${escapeHtml(click.outcome)}">${escapeHtml(click.outcome)}</span></td><td>${escapeHtml(click.latency_ms)} ms</td><td title="${escapeHtml(click.error_text||'')}">${escapeHtml(click.error_text||'—')}</td></tr>`}).join(''):'<tr><td class="empty" colspan="7">Browser initializing — events will appear here.</td></tr>';$('#run-message').textContent=run.error_text?`${run.status} · ${run.error_text}`:`Run ${id} · ${run.status}`;}catch(_){}}
-async function loadHistory(){try{const response=await api('/api/runs'),runs=await response.json();const running=runs.find(run=>run.status==='running');if(running)watchRun(running.id);$('#history-list').innerHTML=runs.length?runs.map(run=>`<div class="history-item" data-history-run="${escapeHtml(run.id)}"><span>${escapeHtml(new Date(run.started_at).toLocaleString())}</span><span>${escapeHtml(run.site_url)}</span><span class="run-status">${escapeHtml(runStatusText(run))}</span><span>${escapeHtml(run.id)}</span><button data-run="${escapeHtml(run.id)}">VIEW / CSV ↗</button></div>`).join(''):'<div class="empty">No runs yet.</div>';document.querySelectorAll('[data-run]').forEach(button=>button.addEventListener('click',()=>{selectRun(button.dataset.run);document.querySelector('.log-panel').scrollIntoView({behavior:'smooth'})}))}catch(_){}}
+async function loadHistory(){try{const response=await api('/api/runs'),runs=await response.json();const running=runs.find(run=>run.status==='running');if(running)watchRun(running.id);const hCount=$('#history-count');if(hCount)hCount.textContent=runs.length;$('#history-list').innerHTML=runs.length?runs.map(run=>`<div class="history-item" data-history-run="${escapeHtml(run.id)}"><span>${escapeHtml(new Date(run.started_at).toLocaleString())}</span><span>${escapeHtml(run.site_url)}</span><span class="run-status">${escapeHtml(runStatusText(run))}</span><span>${escapeHtml(run.id)}</span><button data-run="${escapeHtml(run.id)}">VIEW / CSV ↗</button></div>`).join(''):'<div class="empty">No runs yet.</div>';document.querySelectorAll('[data-run]').forEach(button=>button.addEventListener('click',()=>{selectRun(button.dataset.run);document.querySelector('.log-panel').scrollIntoView({behavior:'smooth'})}))}catch(_){}}
 checkSession();
+
+// Run history collapse/expand toggle
+const btnToggleHistory = $('#btn-toggle-history');
+const headToggleHistory = $('#history-toggle-head');
+function toggleHistory() {
+  const content = $('#history-content');
+  const icon = $('#history-toggle-icon');
+  const text = $('#history-toggle-text');
+  if (!content) return;
+  const isHidden = content.classList.toggle('hidden');
+  if (icon) icon.textContent = isHidden ? '▼' : '▲';
+  if (text) text.textContent = isHidden ? 'Expand History' : 'Collapse History';
+}
+if (btnToggleHistory) {
+  btnToggleHistory.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleHistory();
+  });
+}
+if (headToggleHistory) {
+  headToggleHistory.addEventListener('click', toggleHistory);
+}
 
 // Tab switching
 document.querySelectorAll('.nav-tab').forEach(btn => {
