@@ -544,14 +544,25 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 turbo = page.evaluate("""([minAmt, maxAmt]) => {
                     return new Promise((resolve) => {
                         let finished = false;
+                        let timeoutTimer = null;
+                        let scanInterval = null;
+                        let tabSwitchInterval = null;
+                        let modalTimer = null;
+                        let observer = null;
 
                         function fireFullClick(el) {
                             if (!el) return;
+                            try { el.scrollIntoView({ block: 'nearest' }); } catch(_) {}
                             try { el.focus(); } catch(_) {}
-                            try { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch(_) {}
-                            try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch(_) {}
-                            try { el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true })); } catch(_) {}
-                            try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); } catch(_) {}
+                            const opts = { bubbles: true, cancelable: true, composed: true, view: window };
+                            const mouseOpts = { ...opts, buttons: 1, button: 0 };
+                            try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch(_) {}
+                            try { el.dispatchEvent(new PointerEvent('pointerenter', opts)); } catch(_) {}
+                            try { el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts)); } catch(_) {}
+                            try { el.dispatchEvent(new MouseEvent('mousedown', mouseOpts)); } catch(_) {}
+                            try { el.dispatchEvent(new PointerEvent('pointerup', mouseOpts)); } catch(_) {}
+                            try { el.dispatchEvent(new MouseEvent('mouseup', mouseOpts)); } catch(_) {}
+                            try { el.dispatchEvent(new MouseEvent('click', mouseOpts)); } catch(_) {}
                             try { el.click(); } catch(_) {}
                         }
 
@@ -645,7 +656,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 fireFullClick(btn);
                                 const startTime = performance.now();
 
-                                const modalTimer = setInterval(() => {
+                                modalTimer = setInterval(() => {
                                     const elapsed = performance.now() - startTime;
 
                                     const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
@@ -775,28 +786,41 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             }
                         }
 
-                        let observer = null;
                         try {
                             observer = new MutationObserver(() => checkPage());
                             observer.observe(document.body, { childList: true, subtree: true, characterData: true });
                         } catch (_) {}
 
-                        const scanInterval = setInterval(checkPage, 25);
-                        const tabSwitchInterval = setInterval(() => {
+                        function cleanup() {
+                            if (observer) {
+                                try { observer.disconnect(); } catch(_) {}
+                                observer = null;
+                            }
+                            if (scanInterval) {
+                                clearInterval(scanInterval);
+                                scanInterval = null;
+                            }
+                            if (tabSwitchInterval) {
+                                clearInterval(tabSwitchInterval);
+                                tabSwitchInterval = null;
+                            }
+                            if (timeoutTimer) {
+                                clearTimeout(timeoutTimer);
+                                timeoutTimer = null;
+                            }
+                            if (modalTimer) {
+                                clearInterval(modalTimer);
+                                modalTimer = null;
+                            }
+                        }
+
+                        scanInterval = setInterval(checkPage, 25);
+                        tabSwitchInterval = setInterval(() => {
                             if (!finished) doTabSwitch();
                         }, 1200);
                         checkPage();
 
-                        function cleanup() {
-                            if (observer) {
-                                try { observer.disconnect(); } catch(_) {}
-                            }
-                            clearInterval(scanInterval);
-                            clearInterval(tabSwitchInterval);
-                            clearTimeout(timeoutTimer);
-                        }
-
-                        const timeoutTimer = setTimeout(() => {
+                        timeoutTimer = setTimeout(() => {
                             if (!finished) {
                                 finished = true;
                                 cleanup();
