@@ -418,14 +418,25 @@ def _ensure_logged_in(page, config) -> None:
         if "/login" not in page.url:
             return
         parsed = urlparse(config["site_url"])
-        root = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+        origin = f"{parsed.scheme}://{parsed.netloc}"
         email = page.get_by_role("textbox", name=re.compile("email", re.IGNORECASE))
+        if not email.count():
+            email = page.locator('input[type="email"], input[autocomplete="username"], input[type="text"]').first
         email.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
         email.fill(config["email"])
-        page.locator('input[type="password"]').first.fill(config["password"])
-        page.get_by_role("button", name=re.compile(r"^Sign in$", re.IGNORECASE)).click(timeout=10_000)
-        page.wait_for_url(re.compile(r"/dashboard(?:$|[/?#])"), timeout=LOGIN_TIMEOUT_MS)
-        page.goto(f"{root}/payouts", wait_until="domcontentloaded", timeout=30_000)
+        password = page.locator('input[type="password"]').first
+        password.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
+        password.fill(config["password"])
+        sign_btn = page.get_by_role("button", name=re.compile(r"sign in|log in|login", re.IGNORECASE))
+        if sign_btn.count():
+            sign_btn.first.click(timeout=10_000)
+        else:
+            page.locator('button[type="submit"], input[type="submit"]').first.click(timeout=10_000)
+        try:
+            page.wait_for_url(lambda u: "/login" not in u, timeout=LOGIN_TIMEOUT_MS)
+        except Exception:
+            pass
+        page.goto(f"{origin}/payouts", wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_timeout(1500)
     except Exception:
         pass
@@ -866,30 +877,46 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
             parsed = urlparse(config["site_url"])
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("Site URL must be a valid http or https URL")
-            root = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-            page.goto(f"{root}/login", wait_until="domcontentloaded", timeout=30_000)
-            email = page.get_by_role("textbox", name=re.compile("email", re.IGNORECASE))
-            if not email.count():
-                email = page.locator('input[type="email"], input[autocomplete="username"], input[type="text"]').first
-            password = page.locator('input[type="password"]').first
-            email.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
-            password.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
-            email.fill(config["email"])
-            password.fill(config["password"])
-            page.get_by_role("button", name=re.compile(r"^Sign in$", re.IGNORECASE)).click(timeout=10_000)
-            try:
-                page.wait_for_url(re.compile(r"/dashboard(?:$|[/?#])"), timeout=LOGIN_TIMEOUT_MS)
-            except Exception as exc:
-                db.update_login_status(run_id, "failed")
-                raise RuntimeError("Login failed: dashboard redirect was not observed") from exc
-            db.update_login_status(run_id, "success")
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+
+            db.update_login_status(run_id, "logging_in")
+            page.goto(f"{origin}/login", wait_until="domcontentloaded", timeout=30_000)
+            if "/login" in page.url or page.locator('input[type="password"]').count():
+                email = page.get_by_role("textbox", name=re.compile("email", re.IGNORECASE))
+                if not email.count():
+                    email = page.locator('input[type="email"], input[autocomplete="username"], input[type="text"]').first
+                password = page.locator('input[type="password"]').first
+                email.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
+                password.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
+                email.fill(config["email"])
+                password.fill(config["password"])
+                sign_btn = page.get_by_role("button", name=re.compile(r"sign in|log in|login", re.IGNORECASE))
+                if sign_btn.count():
+                    sign_btn.first.click(timeout=10_000)
+                else:
+                    page.locator('button[type="submit"], input[type="submit"]').first.click(timeout=10_000)
+                try:
+                    page.wait_for_url(lambda u: "/login" not in u, timeout=LOGIN_TIMEOUT_MS)
+                except Exception as exc:
+                    err_msg = ""
+                    try:
+                        err_el = page.locator('[role="alert"], .error, .alert, .tui-notification, [class*="error"]').first
+                        if err_el.count() and err_el.is_visible():
+                            err_msg = err_el.inner_text().strip()
+                    except Exception:
+                        pass
+                    db.update_login_status(run_id, "failed")
+                    raise RuntimeError(f"Login failed: {err_msg or 'login redirect was not observed'}") from exc
+
+            db.update_login_status(run_id, "navigating_payouts")
             if stop_event.is_set():
                 status = "stopped"
             else:
-                page.goto(f"{root}/payouts", wait_until="domcontentloaded", timeout=30_000)
+                page.goto(f"{origin}/payouts", wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_timeout(500)
                 _close_chat_toast(page)
                 _dismiss_blocking_dialogs(page)
+                db.update_login_status(run_id, "success")
                 min_amount = Decimal(config["min_amount"]) if config.get("min_amount") else None
                 max_amount = Decimal(config["max_amount"]) if config.get("max_amount") else None
                 rate_limit = _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accept_resp, js_errors, server_errors, min_amount, max_amount)

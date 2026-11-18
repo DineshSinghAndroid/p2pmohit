@@ -55,6 +55,7 @@ class StartRequest(BaseModel):
     clicks_per_minute: int | None = Field(default=None, ge=1, le=600)
     proxy: str | None = None
     stealth_mode: bool = True
+    force: bool = False
 
     @model_validator(mode="after")
     def amount_bounds(self):
@@ -184,7 +185,7 @@ async def start_run(payload: StartRequest, request: Request):
     port = site.port
     default_port = port == (443 if site.scheme == "https" else 80)
     authority = site.host if not port or default_port else f"{site.host}:{port}"
-    config["site_url"] = f"{site.scheme}://{authority}{site.path.rstrip('/')}"
+    config["site_url"] = f"{site.scheme}://{authority}"
     run_info = {
         "id": run_id, "status": "running", "site_url": config["site_url"],
         "min_amount": config["min_amount"], "max_amount": config["max_amount"],
@@ -192,6 +193,15 @@ async def start_run(payload: StartRequest, request: Request):
         "clicks_per_minute": config["clicks_per_minute"], "login_status": "pending", "started_at": now,
     }
     with RUN_LOCK:
+        if payload.force:
+            for r in DB.list_runs(limit=50):
+                if r["status"] == "running":
+                    ev = RUN_EVENTS.get(r["id"])
+                    if ev:
+                        ev.set()
+                    DB.update_run(r["id"], "stopped", datetime.now(timezone.utc).isoformat(), "Force-stopped for new run")
+                    RUN_EVENTS.pop(r["id"], None)
+
         if DB.has_active_run():
             raise HTTPException(status_code=409, detail="A browser run is already active")
         DB.create_run(run_info)
@@ -199,6 +209,22 @@ async def start_run(payload: StartRequest, request: Request):
         RUN_EVENTS[run_id] = stop_event
         asyncio.create_task(asyncio.to_thread(run_browser, run_id, config, stop_event, DB, str(DATA_DIR / "screenshots")))
     return {"id": run_id, "status": "running"}
+
+
+@app.post("/api/runs/active/stop")
+def stop_active_runs(request: Request):
+    _authenticated(request)
+    stopped_count = 0
+    with RUN_LOCK:
+        for r in DB.list_runs(limit=50):
+            if r["status"] == "running":
+                event = RUN_EVENTS.get(r["id"])
+                if event:
+                    event.set()
+                DB.update_run(r["id"], "stopped", datetime.now(timezone.utc).isoformat(), "Stopped by user")
+                RUN_EVENTS.pop(r["id"], None)
+                stopped_count += 1
+    return {"ok": True, "stopped": stopped_count}
 
 
 @app.post("/api/runs/{run_id}/stop")
@@ -211,7 +237,6 @@ def stop_run(run_id: str, request: Request):
     if event:
         event.set()
     elif run.get("status") == "running":
-        from datetime import datetime, timezone
         DB.update_run(run_id, "stopped", datetime.now(timezone.utc).isoformat(), "Stopped (no active worker)")
     return {"id": run_id, "status": "stopping"}
 

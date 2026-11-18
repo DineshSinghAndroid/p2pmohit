@@ -4,14 +4,81 @@ function showLogin(){clearInterval(timer);timer=null;activeRunId=null;selectedRu
 async function checkSession(){try{await api('/api/me');showApp()}catch(_){showLogin()}}
 $('#login-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;$('#login-error').textContent='';const fields=Object.fromEntries(new FormData(form));try{await api('/api/login',{method:'POST',body:JSON.stringify(fields)});form.reset();showApp()}catch(error){$('#login-error').textContent=error.message}});
 const _lo=$('#logout');if(_lo)_lo.addEventListener('click',async()=>{await api('/api/logout',{method:'POST'}).catch(()=>{});showLogin()});function setRunning(running){$('#start-run').disabled=running;$('#stop-run').disabled=!running}
-$('#run-form').addEventListener('submit',async event=>{event.preventDefault();const runForm=event.currentTarget;const data=Object.fromEntries(new FormData(runForm));for(const key of ['min_amount','max_amount','max_clicks','clicks_per_minute','proxy'])if(!data[key]||!data[key].trim())data[key]=null;data.delay_ms=50;data.clicks_per_minute=null;if(data.max_clicks!==null)data.max_clicks=Number(data.max_clicks);const sT=document.querySelector('#stealth-mode-toggle');data.stealth_mode=sT?sT.checked:(data.stealth_mode!=='false');$('#run-message').textContent='Starting browser worker…';try{const response=await api('/api/runs',{method:'POST',body:JSON.stringify(data)}),run=await response.json();delete data.email;delete data.password;try{localStorage.setItem('pct_saved',JSON.stringify({site_url:runForm.elements.site_url.value,email:runForm.elements.email.value,min_amount:runForm.elements.min_amount.value,max_amount:runForm.elements.max_amount.value,proxy:runForm.elements.proxy?runForm.elements.proxy.value:''}))}catch(_){}resetStats();watchRun(run.id);loadHistory()}catch(error){$('#run-message').textContent=error.message;await loadHistory()}});
-$('#stop-run').addEventListener('click',async()=>{if(!activeRunId)return;try{await api('/api/runs/'+activeRunId+'/stop',{method:'POST'});$('#run-message').textContent='Stop requested…'}catch(error){$('#run-message').textContent=error.message}});
+$('#run-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const runForm=event.currentTarget;
+  const data=Object.fromEntries(new FormData(runForm));
+  for(const key of ['min_amount','max_amount','max_clicks','clicks_per_minute','proxy'])if(!data[key]||!data[key].trim())data[key]=null;
+  data.delay_ms=50;
+  data.clicks_per_minute=null;
+  if(data.max_clicks!==null)data.max_clicks=Number(data.max_clicks);
+  const sT=document.querySelector('#stealth-mode-toggle');
+  data.stealth_mode=sT?sT.checked:(data.stealth_mode!=='false');
+
+  if(!data.email || !data.email.trim() || !data.password) {
+    $('#run-message').textContent = '⚠ Target account email and password are required!';
+    $('#run-message').style.color = '#ff8590';
+    return;
+  }
+  $('#run-message').style.color = '';
+  $('#run-message').textContent='Starting browser worker…';
+  try{
+    const response=await api('/api/runs',{method:'POST',body:JSON.stringify(data)}),run=await response.json();
+    delete data.email;
+    delete data.password;
+    try{localStorage.setItem('pct_saved',JSON.stringify({site_url:runForm.elements.site_url.value,email:runForm.elements.email.value,min_amount:runForm.elements.min_amount.value,max_amount:runForm.elements.max_amount.value,proxy:runForm.elements.proxy?runForm.elements.proxy.value:''}))}catch(_){}
+    resetStats();
+    watchRun(run.id);
+    loadHistory();
+  }catch(error){
+    if(error.message && error.message.includes('already active')) {
+      $('#run-message').innerHTML = '<span style="color:#ff8590;">A run is already active. </span><button type="button" id="btn-force-stop" style="padding:3px 8px;font-size:11px;background:#55242d;color:#ff8590;border:1px solid #ff8590;border-radius:4px;cursor:pointer;font-weight:600;">Stop &amp; Restart</button>';
+      const b = document.querySelector('#btn-force-stop');
+      if (b) {
+        b.onclick = async () => {
+          b.disabled = true;
+          b.textContent = 'Stopping…';
+          await api('/api/runs/active/stop', {method:'POST'}).catch(()=>{});
+          data.force = true;
+          try {
+            const resp = await api('/api/runs', {method:'POST', body:JSON.stringify(data)});
+            const newRun = await resp.json();
+            resetStats();
+            watchRun(newRun.id);
+            loadHistory();
+          } catch(e) {
+            $('#run-message').textContent = e.message;
+            await loadHistory();
+          }
+        };
+      }
+    } else {
+      $('#run-message').textContent=error.message;
+    }
+    await loadHistory();
+  }
+});
+$('#stop-run').addEventListener('click',async()=>{
+  try{
+    if(activeRunId) {
+      await api('/api/runs/'+activeRunId+'/stop',{method:'POST'}).catch(()=>{});
+    }
+    await api('/api/runs/active/stop',{method:'POST'}).catch(()=>{});
+    $('#run-message').textContent='Stop requested…';
+    activeRunId=null;
+    setRunning(false);
+    await loadHistory();
+  }catch(error){
+    $('#run-message').textContent=error.message;
+  }
+});
 function selectRun(id){selectedRunId=id;$('#export-link').href='/api/runs/'+id+'/export.csv';$('#export-link').classList.remove('disabled');refreshRun(id)}
 function watchRun(id){if(activeRunId===id)return;clearInterval(timer);activeRunId=id;setRunning(true);selectRun(id);timer=setInterval(()=>refreshRun(id),1200)}
 function resetStats(){['total','accepted','skipped','rate','failures'].forEach(key=>$(`#stat-${key}`).textContent='0');$('#failure-breakdown').textContent='No failure reasons';$('#stat-latency').textContent='0 / 0';$('#clicks-body').innerHTML='<tr><td class="empty" colspan="7">Connecting to browser worker…</td></tr>'}
 function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
 function runStatusText(run) {
-  return `${run.status.toUpperCase()} · LOGIN ${(run.login_status || 'pending').toUpperCase()}`;
+  const loginTxt = (run.login_status || 'pending').toUpperCase().replace('_', ' ');
+  return `${run.status.toUpperCase()} · LOGIN: ${loginTxt}`;
 }
 
 function updateHistoryStatus(run) {
@@ -20,7 +87,7 @@ function updateHistoryStatus(run) {
 }
 
 async function refreshRun(id){try{const response=await api(`/api/runs/${id}`),{stats,clicks,run}=await response.json();
-  updateHistoryStatus(run);if(id===activeRunId&&run.status!=='running'){clearInterval(timer);timer=null;activeRunId=null;setRunning(false);loadHistory()}if(id!==selectedRunId)return;$('#stat-total').textContent=stats.total_clicks;$('#stat-accepted').textContent=stats.accepted+stats.otp_reached;$('#stat-skipped').textContent=stats.skipped+stats.limit_reached;$('#stat-rate').textContent=stats.rate_limited||0;$('#stat-failures').textContent=stats.failures;$('#failure-breakdown').textContent=Object.entries(stats.failure_reasons).map(([reason,count])=>`${count}× ${reason}`).join(' · ')||'No failure reasons';$('#stat-latency').textContent=`${stats.avg_latency_ms} / ${stats.p95_latency_ms}`;$('#click-count').textContent=clicks.length;$('#clicks-body').innerHTML=clicks.length?clicks.map(click=>{const isAcc=click.outcome==='ACCEPTED'||click.outcome==='OTP_REACHED';return `<tr class="${isAcc?'row-accepted':''}"><td>${escapeHtml(new Date(click.timestamp).toLocaleTimeString())}</td><td>${escapeHtml(click.row_id)}</td><td>₹${escapeHtml(click.amount)}</td><td>${click.popup_shown?'YES':'NO'}</td><td><span class="outcome ${escapeHtml(click.outcome)}">${escapeHtml(click.outcome)}</span></td><td>${escapeHtml(click.latency_ms)} ms</td><td title="${escapeHtml(click.error_text||'')}">${escapeHtml(click.error_text||'—')}</td></tr>`}).join(''):'<tr><td class="empty" colspan="7">Browser initializing — events will appear here.</td></tr>';$('#run-message').textContent=run.error_text?`${run.status} · ${run.error_text}`:`Run ${id} · ${run.status}`;}catch(_){}}
+  updateHistoryStatus(run);if(id===activeRunId&&run.status!=='running'){clearInterval(timer);timer=null;activeRunId=null;setRunning(false);loadHistory()}if(id!==selectedRunId)return;$('#stat-total').textContent=stats.total_clicks;$('#stat-accepted').textContent=stats.accepted+stats.otp_reached;$('#stat-skipped').textContent=stats.skipped+stats.limit_reached;$('#stat-rate').textContent=stats.rate_limited||0;$('#stat-failures').textContent=stats.failures;$('#failure-breakdown').textContent=Object.entries(stats.failure_reasons).map(([reason,count])=>`${count}× ${reason}`).join(' · ')||'No failure reasons';$('#stat-latency').textContent=`${stats.avg_latency_ms} / ${stats.p95_latency_ms}`;$('#click-count').textContent=clicks.length;$('#clicks-body').innerHTML=clicks.length?clicks.map(click=>{const isAcc=click.outcome==='ACCEPTED'||click.outcome==='OTP_REACHED';return `<tr class="${isAcc?'row-accepted':''}"><td>${escapeHtml(new Date(click.timestamp).toLocaleTimeString())}</td><td>${escapeHtml(click.row_id)}</td><td>₹${escapeHtml(click.amount)}</td><td>${click.popup_shown?'YES':'NO'}</td><td><span class="outcome ${escapeHtml(click.outcome)}">${escapeHtml(click.outcome)}</span></td><td>${escapeHtml(click.latency_ms)} ms</td><td title="${escapeHtml(click.error_text||'')}">${escapeHtml(click.error_text||'—')}</td></tr>`}).join(''):'<tr><td class="empty" colspan="7">Browser initializing — events will appear here.</td></tr>';const loginTxt=(run.login_status||'pending').toUpperCase().replace('_',' ');$('#run-message').textContent=run.error_text?`${run.status} · ${run.error_text}`:`Run ${id} (${run.status.toUpperCase()} · LOGIN: ${loginTxt})`;}catch(_){}}
 async function loadHistory(){try{const response=await api('/api/runs'),runs=await response.json();const running=runs.find(run=>run.status==='running');if(running)watchRun(running.id);const hCount=$('#history-count');if(hCount)hCount.textContent=runs.length;$('#history-list').innerHTML=runs.length?runs.map(run=>`<div class="history-item" data-history-run="${escapeHtml(run.id)}"><span>${escapeHtml(new Date(run.started_at).toLocaleString())}</span><span>${escapeHtml(run.site_url)}</span><span class="run-status">${escapeHtml(runStatusText(run))}</span><span>${escapeHtml(run.id)}</span><button data-run="${escapeHtml(run.id)}">VIEW / CSV ↗</button></div>`).join(''):'<div class="empty">No runs yet.</div>';document.querySelectorAll('[data-run]').forEach(button=>button.addEventListener('click',()=>{selectRun(button.dataset.run);document.querySelector('.log-panel').scrollIntoView({behavior:'smooth'})}))}catch(_){}}
 checkSession();
 

@@ -149,3 +149,29 @@ def test_settings_save_and_retrieve_saved_accounts(tmp_path, monkeypatch):
     assert saved["saved_accounts"][0]["password"] == "pass1"
 
 
+def test_force_start_and_stop_active_runs(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "force-stop.sqlite3"))
+    monkeypatch.setattr(main, "DB", database)
+    monkeypatch.setattr(main, "run_browser", lambda *_args: None)
+    client = TestClient(main.app)
+    client.post("/api/login", json={"username": main.ADMIN_USER, "password": main.ADMIN_PASS})
+    payload = {"site_url": "https://example.test", "email": "dummy@example.test", "password": "dummy"}
+    first = client.post("/api/runs", json=payload)
+    assert first.status_code == 200
+    assert database.has_active_run()
+
+    # Normal start gets 409
+    assert client.post("/api/runs", json=payload).status_code == 409
+
+    # Stop active runs endpoint clears it
+    stop_res = client.post("/api/runs/active/stop")
+    assert stop_res.status_code == 200
+    assert not database.has_active_run()
+
+    # Force start stops any active run and starts new one
+    first_again = client.post("/api/runs", json=payload)
+    assert first_again.status_code == 200
+    force_start = client.post("/api/runs", json={**payload, "force": True})
+    assert force_start.status_code == 200
+
+
