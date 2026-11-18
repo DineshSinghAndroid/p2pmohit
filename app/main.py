@@ -96,7 +96,8 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (BASE_DIR / "app" / "static" / "index.html").read_text()
+    content = (BASE_DIR / "app" / "static" / "index.html").read_text()
+    return HTMLResponse(content=content, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 @app.get("/sw.js")

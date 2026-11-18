@@ -261,20 +261,36 @@ def _refresh_list(page):
     try:
         refreshed = page.evaluate("""() => {
             const btns = [...document.querySelectorAll('button, a[role="button"]')];
-            const ref = btns.find(b => /refresh[\\s]*list/i.test(b.innerText || b.textContent || '') || b.getAttribute('automation-id') === 'autotest_button_refresh');
+            const ref = btns.find(b => {
+                const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                const autoId = (b.getAttribute('automation-id') || '').toLowerCase();
+                const title = (b.getAttribute('title') || '').toLowerCase();
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                const iconSvg = b.querySelector('svg, i, tui-svg');
+                const iconHtml = iconSvg ? (iconSvg.outerHTML || '').toLowerCase() : '';
+
+                if (/refresh|reload|sync|update|обновить/i.test(text)) return true;
+                if (/refresh|reload|sync/i.test(autoId)) return true;
+                if (/refresh|reload|sync/i.test(title)) return true;
+                if (/refresh|reload|sync/i.test(aria)) return true;
+                if (/refresh|reload|sync|rotate/i.test(iconHtml)) return true;
+                return false;
+            });
             if (ref && !ref.disabled && ref.offsetParent !== null) {
                 ref.click();
                 return true;
             }
+            // Fallback: in-page payouts tab or filter link
+            const payoutsTab = document.querySelector('a[routerlink*="payouts"], a[href$="/payouts"]');
+            if (payoutsTab && !payoutsTab.disabled && payoutsTab.offsetParent !== null) {
+                payoutsTab.click();
+                return true;
+            }
             return false;
         }""")
-        if refreshed:
-            return True
-        page.reload(wait_until="domcontentloaded", timeout=10_000)
-        return True
+        return bool(refreshed)
     except Exception:
-        pass
-    return False
+        return False
 
 
 
@@ -447,9 +463,18 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
     seq = 0
     last_click = [0.0]
     last_refresh = [time.monotonic()]
+    last_heartbeat = [time.monotonic()]
+    seen_skipped_ids = set()
     consecutive_429 = [0]
     min_amt_f = float(min_amount) if min_amount is not None else None
     max_amt_f = float(max_amount) if max_amount is not None else None
+
+    def log(msg: str, level: str = "INFO"):
+        if hasattr(db, "add_log"):
+            try:
+                db.add_log(run_id, msg, level)
+            except Exception:
+                pass
 
     def record(amount, popup_shown, outcome, latency_ms, error_text=None, row_id=""):
         db.add_click({"run_id": run_id, "row_id": row_id, "amount": str(amount), "timestamp": utc_now(),
@@ -523,6 +548,15 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     }
 
                     function extractRowId(tr) {
+                        if (tr.id) return tr.id;
+                        const autoId = tr.getAttribute('automation-id');
+                        if (autoId) return autoId;
+                        const link = tr.querySelector('a[href*="/payouts/"], a[href*="/order/"]');
+                        if (link && link.getAttribute('href')) {
+                            const parts = link.getAttribute('href').split('/');
+                            const last = parts[parts.length - 1];
+                            if (last) return last;
+                        }
                         const cells = tr.querySelectorAll('td, th, [role="cell"]');
                         for (const cell of cells) {
                             const t = (cell.innerText || cell.textContent || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim();
@@ -536,38 +570,81 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         return '';
                     }
 
-                    // 1. Scan candidate buttons directly (top to bottom)
+                    // 1. Scan candidate buttons and rows
                     const candidateButtons = [...document.querySelectorAll('button, a[role="button"], [automation-id="autotest_button_tradeAccept"]')];
+                    const scannedRows = [...document.querySelectorAll('tbody tr, [role="row"]')];
+
                     let target = null;
+                    const skippedItems = [];
+                    let takenCount = 0;
+                    let outOfRangeCount = 0;
 
                     for (const btn of candidateButtons) {
-                        if (!isEligibleAcceptButton(btn)) continue;
-
                         const tr = btn.closest('tr') || btn.closest('[role="row"]') || btn.parentElement;
                         if (!tr) continue;
 
+                        const rowId = extractRowId(tr);
                         const trText = norm(tr.innerText || tr.textContent || '');
-                        if (trText.includes('another trader') || trText.includes('too late') || trText.includes('expired')) {
+                        const btnText = norm(btn.innerText || btn.textContent || '');
+                        const isTaken = trText.includes('another trader') || trText.includes('too late') || trText.includes('expired') ||
+                                        btnText.includes('another trader') || btnText.includes('too late') || btnText.includes('expired');
+
+                        const amt = parseRowAmount(tr);
+
+                        if (isTaken) {
+                            takenCount++;
+                            skippedItems.push({
+                                row_id: rowId,
+                                amount: amt || 0,
+                                outcome: 'TAKEN_BY_OTHER',
+                                reason: 'Accepted by another trader'
+                            });
                             continue;
                         }
 
-                        const amt = parseRowAmount(tr);
-                        if (amt === null) continue;
+                        if (!isEligibleAcceptButton(btn)) continue;
 
-                        // Min/Max filter check on the exact row amount
-                        if (minAmt !== null && amt < minAmt) continue;
-                        if (maxAmt !== null && amt > maxAmt) continue;
+                        if (amt !== null) {
+                            if (minAmt !== null && amt < minAmt) {
+                                outOfRangeCount++;
+                                skippedItems.push({
+                                    row_id: rowId,
+                                    amount: amt,
+                                    outcome: 'SKIPPED',
+                                    reason: `Amount ₹${amt.toLocaleString('en-IN')} < Min ₹${minAmt.toLocaleString('en-IN')}`
+                                });
+                                continue;
+                            }
+                            if (maxAmt !== null && amt > maxAmt) {
+                                outOfRangeCount++;
+                                skippedItems.push({
+                                    row_id: rowId,
+                                    amount: amt,
+                                    outcome: 'SKIPPED',
+                                    reason: `Amount ₹${amt.toLocaleString('en-IN')} > Max ₹${maxAmt.toLocaleString('en-IN')}`
+                                });
+                                continue;
+                            }
+                        }
 
+                        // Matching eligible order found!
                         target = {
                             btn: btn,
-                            amount: amt,
-                            row_id: extractRowId(tr)
+                            amount: amt || 0,
+                            row_id: rowId
                         };
                         break;
                     }
 
                     if (!target) {
-                        return Promise.resolve({ clicked: false, reason: 'no_matching_row' });
+                        return Promise.resolve({
+                            clicked: false,
+                            reason: 'no_matching_row',
+                            total_rows: scannedRows.length,
+                            taken_count: takenCount,
+                            out_of_range_count: outOfRangeCount,
+                            skipped_items: skippedItems.slice(0, 10)
+                        });
                     }
 
                     // 2. Click the matching button immediately
@@ -644,11 +721,42 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 }""", [min_amt_f, max_amt_f])
 
                 if not turbo.get("clicked"):
-                    # No matching eligible orders in table right now
+                    # Record newly seen skipped orders so user sees them in Click Log and counters
+                    for item in turbo.get("skipped_items", []):
+                        r_id = item.get("row_id") or f"row_{item.get('amount')}"
+                        if r_id not in seen_skipped_ids:
+                            seen_skipped_ids.add(r_id)
+                            if len(seen_skipped_ids) > 1000:
+                                seen_skipped_ids.clear()
+                            amt_val = Decimal(str(item.get("amount") or 0))
+                            record(
+                                amount=amt_val,
+                                popup_shown=False,
+                                outcome=item.get("outcome", "SKIPPED"),
+                                latency_ms=0,
+                                error_text=item.get("reason"),
+                                row_id=r_id
+                            )
+                            log(f"Skipped order {r_id} (₹{amt_val}): {item.get('reason')}")
+
+                    # Heartbeat log every 3 seconds
+                    if time.monotonic() - last_heartbeat[0] >= 3.0:
+                        last_heartbeat[0] = time.monotonic()
+                        t_rows = turbo.get("total_rows", 0)
+                        taken = turbo.get("taken_count", 0)
+                        oor = turbo.get("out_of_range_count", 0)
+                        range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
+                        range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
+                        if t_rows > 0:
+                            log(f"Table scanned: {t_rows} orders visible ({taken} taken by other traders, {oor} outside range [{range_str}]). Active order monitoring live.")
+                        else:
+                            log("Table scanned: Queue empty. Auto-refreshing list...")
+
                     if stop_event.wait(0.025):
                         break
-                    # Click in-page "Refresh list" button every 1.0 second if no matching orders exist
-                    if time.monotonic() - last_refresh[0] >= 1.0:
+
+                    # Click in-page "Refresh list" button every 1.5 seconds if no matching orders exist
+                    if time.monotonic() - last_refresh[0] >= 1.5:
                         last_refresh[0] = time.monotonic()
                         _refresh_list(page)
                     continue
@@ -657,6 +765,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 last_click[0] = time.monotonic()
                 amount = Decimal(str(turbo["amount"]))
                 row_id = turbo.get("row_id", "")
+                log(f"MATCH FOUND: ₹{amount} (Order: {row_id}). Executed modal confirm in {turbo.get('elapsed_ms', 0)}ms!")
 
                 if turbo.get("taken_by_other"):
                     lat = turbo.get("elapsed_ms", round((time.perf_counter() - started) * 1000))

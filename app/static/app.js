@@ -14,6 +14,7 @@ $('#run-form').addEventListener('submit',async event=>{
   if(data.max_clicks!==null)data.max_clicks=Number(data.max_clicks);
   const sT=document.querySelector('#stealth-mode-toggle');
   data.stealth_mode=sT?sT.checked:(data.stealth_mode!=='false');
+  data.force = true;
 
   if(!data.email || !data.email.trim() || !data.password) {
     $('#run-message').textContent = '⚠ Target account email and password are required!';
@@ -87,7 +88,17 @@ function updateHistoryStatus(run) {
 }
 
 async function refreshRun(id){try{const response=await api(`/api/runs/${id}`),{stats,clicks,run,logs}=await response.json();
-  updateHistoryStatus(run);if(id===activeRunId&&run.status!=='running'){clearInterval(timer);timer=null;activeRunId=null;setRunning(false);loadHistory()}if(id!==selectedRunId)return;$('#stat-total').textContent=stats.total_clicks;$('#stat-accepted').textContent=stats.accepted+stats.otp_reached;$('#stat-skipped').textContent=stats.skipped+stats.limit_reached;$('#stat-rate').textContent=stats.rate_limited||0;$('#stat-failures').textContent=stats.failures;$('#failure-breakdown').textContent=Object.entries(stats.failure_reasons).map(([reason,count])=>`${count}× ${reason}`).join(' · ')||'No failure reasons';$('#stat-latency').textContent=`${stats.avg_latency_ms} / ${stats.p95_latency_ms}`;$('#click-count').textContent=clicks.length;$('#clicks-body').innerHTML=clicks.length?clicks.map(click=>{const isAcc=click.outcome==='ACCEPTED'||click.outcome==='OTP_REACHED';return `<tr class="${isAcc?'row-accepted':''}"><td>${escapeHtml(new Date(click.timestamp).toLocaleTimeString())}</td><td>${escapeHtml(click.row_id)}</td><td>₹${escapeHtml(click.amount)}</td><td>${click.popup_shown?'YES':'NO'}</td><td><span class="outcome ${escapeHtml(click.outcome)}">${escapeHtml(click.outcome)}</span></td><td>${escapeHtml(click.latency_ms)} ms</td><td title="${escapeHtml(click.error_text||'')}">${escapeHtml(click.error_text||'—')}</td></tr>`}).join(''):'<tr><td class="empty" colspan="7">Browser initializing — events will appear here.</td></tr>';const loginTxt=(run.login_status||'pending').toUpperCase().replace('_',' ');$('#run-message').textContent=run.error_text?`${run.status} · ${run.error_text}`:`Run ${id} (${run.status.toUpperCase()} · LOGIN: ${loginTxt})`;
+  const emptyMsg = (run.status === 'running')
+    ? '⚡ Bot is ACTIVE and scanning orders on /payouts in real-time... (New orders will appear here instantly)'
+    : 'No events recorded for this run.';
+  $('#clicks-body').innerHTML = clicks.length
+    ? clicks.map(click => {
+        const isAcc = click.outcome === 'ACCEPTED' || click.outcome === 'OTP_REACHED';
+        return `<tr class="${isAcc ? 'row-accepted' : ''}"><td>${escapeHtml(new Date(click.timestamp).toLocaleTimeString())}</td><td>${escapeHtml(click.row_id)}</td><td>₹${escapeHtml(click.amount)}</td><td>${click.popup_shown ? 'YES' : 'NO'}</td><td><span class="outcome ${escapeHtml(click.outcome)}">${escapeHtml(click.outcome)}</span></td><td>${escapeHtml(click.latency_ms)} ms</td><td title="${escapeHtml(click.error_text || '')}">${escapeHtml(click.error_text || '—')}</td></tr>`;
+      }).join('')
+    : `<tr><td class="empty" colspan="7">${emptyMsg}</td></tr>`;
+  const loginTxt = (run.login_status || 'pending').toUpperCase().replace('_', ' ');
+  $('#run-message').textContent = run.error_text ? `${run.status} · ${run.error_text}` : `Run ${id} (${run.status.toUpperCase()} · LOGIN: ${loginTxt})`;
   const logConsole=$('#bot-logs-console'),logCount=$('#log-count');if(logs&&Array.isArray(logs)&&logConsole){if(logCount)logCount.textContent=logs.length;if(logs.length>0){logConsole.innerHTML=logs.map(l=>{const t=new Date(l.timestamp).toLocaleTimeString(),c=l.level==='ERROR'?'#ff8590':l.level==='WARN'?'#f5c86c':'#a3e8cc';return `<div style="color:${c};"><span style="color:var(--muted);font-size:10px;">[${t}]</span> ${escapeHtml(l.message)}</div>`}).join('');logConsole.scrollTop=logConsole.scrollHeight;}}
 }catch(_){}}
 async function loadHistory(){try{const response=await api('/api/runs'),runs=await response.json();const running=runs.find(run=>run.status==='running');if(running)watchRun(running.id);const hCount=$('#history-count');if(hCount)hCount.textContent=runs.length;$('#history-list').innerHTML=runs.length?runs.map(run=>`<div class="history-item" data-history-run="${escapeHtml(run.id)}"><span>${escapeHtml(new Date(run.started_at).toLocaleString())}</span><span>${escapeHtml(run.site_url)}</span><span class="run-status">${escapeHtml(runStatusText(run))}</span><span>${escapeHtml(run.id)}</span><button data-run="${escapeHtml(run.id)}">VIEW / CSV ↗</button></div>`).join(''):'<div class="empty">No runs yet.</div>';document.querySelectorAll('[data-run]').forEach(button=>button.addEventListener('click',()=>{selectRun(button.dataset.run);document.querySelector('.log-panel').scrollIntoView({behavior:'smooth'})}))}catch(_){}}
