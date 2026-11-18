@@ -260,8 +260,8 @@ def _watch_counts(page, state):
 def _refresh_list(page):
     try:
         refreshed = page.evaluate("""() => {
-            const btns = [...document.querySelectorAll('button')];
-            const ref = btns.find(b => /refresh\\s*list/i.test(b.innerText || b.textContent || ''));
+            const btns = [...document.querySelectorAll('button, a[role="button"]')];
+            const ref = btns.find(b => /refresh[\\s]*list/i.test(b.innerText || b.textContent || '') || b.getAttribute('automation-id') === 'autotest_button_refresh');
             if (ref && !ref.disabled && ref.offsetParent !== null) {
                 ref.click();
                 return true;
@@ -270,6 +270,8 @@ def _refresh_list(page):
         }""")
         if refreshed:
             return True
+        page.reload(wait_until="domcontentloaded", timeout=10_000)
+        return True
     except Exception:
         pass
     return False
@@ -626,7 +628,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                     elapsed_ms: Math.round(elapsed)
                                 });
                             }
-                        }, 5);
+                        }, 50);
                     });
                 }""", [min_amt_f, max_amt_f])
 
@@ -634,8 +636,8 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     # No matching eligible orders in table right now
                     if stop_event.wait(0.025):
                         break
-                    # Click in-page "Refresh list" button every 1.5 seconds if no matching orders exist
-                    if time.monotonic() - last_refresh[0] >= 1.5:
+                    # Click in-page "Refresh list" button every 1.0 second if no matching orders exist
+                    if time.monotonic() - last_refresh[0] >= 1.0:
                         last_refresh[0] = time.monotonic()
                         _refresh_list(page)
                     continue
@@ -646,78 +648,55 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 row_id = turbo.get("row_id", "")
 
                 if turbo.get("taken_by_other"):
-                    lat = round((time.perf_counter() - started) * 1000)
+                    lat = turbo.get("elapsed_ms", round((time.perf_counter() - started) * 1000))
                     record(amount, True, "TAKEN_BY_OTHER", lat, row_id=row_id)
                     _close_any_dialog(page)
+                    _refresh_list(page)
+                    last_refresh[0] = time.monotonic()
                     continue
 
-                # Confirm was fired within 5ms — now evaluate server response
-                outcome = None
+                # Confirm was fired within 50ms — do not wait for browser/server confirmation
+                lat = turbo.get("elapsed_ms", round((time.perf_counter() - started) * 1000))
+                outcome = "ACCEPTED"
                 err = None
-                deadline = time.monotonic() + 8.0
-                while time.monotonic() < deadline and not stop_event.is_set():
-                    txt = _visible_dialog_text(page).casefold()
+
+                # Check if an immediate HTTP error occurred
+                if accept_resp:
                     limited = next((item for item in accept_resp if item[0] == 429), None)
-                    status, body, retry_after = limited or (accept_resp[-1] if accept_resp else (None, "", None))
-                    if status == 424 and "MAX_SIMULTANEOUS" in body:
-                        outcome, err = "LIMIT_REACHED", "Max simultaneous orders reached"
-                        break
+                    status, body, retry_after = limited or accept_resp[-1]
                     if status == 429:
                         outcome, err = "RATE_LIMITED", body
-                        break
-                    if status == 424 and ("ALREADY_PROCESSED" in body or "already processed" in body.lower()):
+                    elif status == 424 and ("ALREADY_PROCESSED" in body or "already processed" in body.lower()):
                         outcome, err = "TAKEN_BY_OTHER", "Accepted by another trader (424)"
-                        break
-                    if status is not None and status >= 400:
-                        outcome, err = "SKIPPED", f"HTTP {status}: {body[:80]}"
-                        break
-                    if "processing of the request" in txt or "make and confirm" in txt:
-                        outcome, err = "ACCEPTED", None
-                        break
-                    if "accepted by another trader" in txt or "time has expired" in txt or "too late" in txt:
-                        outcome, err = "TAKEN_BY_OTHER", txt[:60].replace("\n", " ")
-                        break
-                    if status is not None and status < 400 and not txt:
-                        outcome, err = "ACCEPTED", None
-                        break
-                    time.sleep(0.015)
+                    elif status == 424 and "MAX_SIMULTANEOUS" in body:
+                        outcome, err = "LIMIT_REACHED", "Max simultaneous orders reached"
 
-                lat = round((time.perf_counter() - started) * 1000)
-                if outcome is None:
-                    outcome, err = "FAIL", "Confirm clicked but no result within 8s"
-                    try:
-                        _failure_screenshot(page, str(Path(screenshot_dir) / f"{run_id}_{seq}.png"), config)
-                    except Exception:
-                        pass
                 record(amount, True, outcome, lat, err, row_id=row_id)
+
                 if outcome == "RATE_LIMITED":
                     _close_any_dialog(page)
                     consecutive_429[0] += 1
-                    # 2s -> 4s -> 8s -> 16s... (2 * 2^(count-1))
-                    exp_wait = 2.0 * (2 ** (consecutive_429[0] - 1))
-                    exp_wait = min(exp_wait, 64.0)
                     server_wait = _retry_after_seconds(retry_after)
-                    wait_s = max(exp_wait, server_wait)
-                    db.update_run(run_id, "running", error_text=f"Rate limited (429 #{consecutive_429[0]}). Waiting {int(wait_s)}s (x2 backoff) before auto-retry...")
+                    wait_s = max(2.0, server_wait)
+                    db.update_run(run_id, "running", error_text=f"Rate limited (429 #{consecutive_429[0]}). Waiting {int(wait_s)}s before auto-retry...")
                     last_click[0] = time.monotonic() + wait_s
                     last_refresh[0] = time.monotonic() + wait_s
                     if stop_event.wait(wait_s):
                         break
                     db.update_run(run_id, "running", error_text=None)
+                    _refresh_list(page)
                     continue
 
                 consecutive_429[0] = 0
                 _close_any_dialog(page)
+
+                # Auto-refresh page immediately after every click to load new orders
+                _refresh_list(page)
                 last_refresh[0] = time.monotonic()
-                if outcome == "ACCEPTED":
-                    # 5 seconds cooldown after accepting an order: no refresh, no clicks
-                    if stop_event.wait(5.0):
-                        break
-                    last_refresh[0] = time.monotonic()
-                    last_click[0] = time.monotonic()
-                elif outcome == "LIMIT_REACHED":
-                    if stop_event.wait(2.0):
-                        break
+
+                # Micro 50ms pause before scanning for the next order
+                if stop_event.wait(0.05):
+                    break
             except Exception as exc:
                 lat = round((time.perf_counter() - started) * 1000)
                 record(amount, popup_shown, "FAIL", lat, _redact(str(exc), config).replace("\n", " ")[:600], row_id=row_id)
