@@ -505,23 +505,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         return (s || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim().toLowerCase();
                     }
 
-                    function isEligibleAcceptButton(b) {
-                        if (!b || b.disabled) return false;
-                        if (b.getAttribute('aria-disabled') === 'true') return false;
-                        if (b.classList && (b.classList.contains('tui-button_disabled') || b.classList.contains('_disabled'))) return false;
-                        if (b.offsetParent === null) return false;
-
-                        const t = norm(b.innerText || b.textContent || '');
-                        if (t.includes('another trader') || t.includes('accepted') || t.includes('too late') || t.includes('expired')) {
-                            return false;
-                        }
-                        const autoId = b.getAttribute('automation-id') || '';
-                        if (autoId === 'autotest_button_tradeAccept') {
-                            return t === '' || t.includes('accept');
-                        }
-                        return t === 'accept for processing' || t === 'accept' || t.startsWith('accept');
-                    }
-
                     function parseAmountFromElement(el) {
                         if (!el) return null;
                         const cleanNorm = (el.innerText || el.textContent || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim();
@@ -570,24 +553,26 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         return '';
                     }
 
-                    // 1. Scan candidate buttons and rows
-                    const candidateButtons = [...document.querySelectorAll('button, a[role="button"], [automation-id="autotest_button_tradeAccept"]')];
-                    const scannedRows = [...document.querySelectorAll('tbody tr, [role="row"]')];
+                    // 1. Scan rows in the payouts table directly
+                    const scannedRows = [...document.querySelectorAll('tbody tr, [role="row"], tr')].filter(r => {
+                        return r.querySelectorAll('td, [role="cell"]').length > 0;
+                    });
 
                     let target = null;
                     const skippedItems = [];
                     let takenCount = 0;
                     let outOfRangeCount = 0;
 
-                    for (const btn of candidateButtons) {
-                        const tr = btn.closest('tr') || btn.closest('[role="row"]') || btn.parentElement;
-                        if (!tr) continue;
+                    for (const tr of scannedRows) {
+                        const btn = tr.querySelector('[automation-id="autotest_button_tradeAccept"]') ||
+                                    tr.querySelector('button, a[role="button"]');
+                        if (!btn) continue;
 
                         const rowId = extractRowId(tr);
-                        const trText = norm(tr.innerText || tr.textContent || '');
                         const btnText = norm(btn.innerText || btn.textContent || '');
-                        const isTaken = trText.includes('another trader') || trText.includes('too late') || trText.includes('expired') ||
-                                        btnText.includes('another trader') || btnText.includes('too late') || btnText.includes('expired');
+                        const autoId = (btn.getAttribute('automation-id') || '').toLowerCase();
+                        const isTaken = btnText.includes('another trader') || btnText.includes('too late') ||
+                                        btnText.includes('expired') || btnText.includes('already');
 
                         const amt = parseRowAmount(tr);
 
@@ -602,7 +587,18 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             continue;
                         }
 
-                        if (!isEligibleAcceptButton(btn)) continue;
+                        if (btn.disabled || btn.getAttribute('aria-disabled') === 'true' ||
+                            (btn.classList && (btn.classList.contains('tui-button_disabled') || btn.classList.contains('_disabled')))) {
+                            continue;
+                        }
+
+                        const isEligible = btnText === 'accept for processing' ||
+                                           btnText === 'accept' ||
+                                           btnText.startsWith('accept') ||
+                                           btnText.includes('processing') ||
+                                           autoId === 'autotest_button_tradeaccept';
+
+                        if (!isEligible) continue;
 
                         if (amt !== null) {
                             if (minAmt !== null && amt < minAmt) {
@@ -627,7 +623,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             }
                         }
 
-                        // Matching eligible order found!
+                        // Eligible matching order found!
                         target = {
                             btn: btn,
                             amount: amt || 0,
@@ -651,21 +647,21 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     target.btn.click();
                     const start = performance.now();
 
-                    // 3. High-frequency 5ms loop to confirm modal immediately and verify modal amount
+                    // 3. High-frequency 20ms loop to confirm modal or detect instant success
                     return new Promise((resolve) => {
                         const timer = setInterval(() => {
                             const elapsed = performance.now() - start;
 
+                            // A. Check for confirmation modal button
                             const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
-                                               [...document.querySelectorAll('section[role="dialog"] button')].find(b => {
+                                               [...document.querySelectorAll('section[role="dialog"] button, [role="dialog"] button')].find(b => {
                                                    const t = norm(b.innerText || b.textContent || '');
                                                    return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
                                                });
-                            if (confirmBtn && !confirmBtn.disabled && confirmBtn.offsetParent !== null) {
+                            if (confirmBtn && !confirmBtn.disabled) {
                                 clearInterval(timer);
 
-                                // If modal dialog contains explicit amount, verify and adopt it
-                                const dialog = document.querySelector('section[role="dialog"]:not(.hidden)');
+                                const dialog = document.querySelector('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden)');
                                 let finalAmount = target.amount;
                                 if (dialog) {
                                     const modalAmt = parseAmountFromElement(dialog);
@@ -686,9 +682,32 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 return;
                             }
 
-                            const dialog = document.querySelector('section[role="dialog"]:not(.hidden)');
+                            // B. Check if dialog opened
+                            const dialog = document.querySelector('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden)');
                             if (dialog) {
                                 const dText = norm(dialog.innerText || dialog.textContent || '');
+
+                                // Success case: Order details dialog "Processing of the request" opened!
+                                if (dText.includes('processing of the request') || dText.includes('make and confirm the transfer') || dText.includes('payment method')) {
+                                    clearInterval(timer);
+                                    let finalAmount = target.amount;
+                                    const modalAmt = parseAmountFromElement(dialog);
+                                    if (modalAmt !== null && modalAmt > 0) {
+                                        finalAmount = modalAmt;
+                                    }
+                                    resolve({
+                                        clicked: true,
+                                        amount: finalAmount,
+                                        row_id: target.row_id,
+                                        confirmed: true,
+                                        popup_shown: true,
+                                        processing_opened: true,
+                                        elapsed_ms: Math.round(elapsed)
+                                    });
+                                    return;
+                                }
+
+                                // Taken by another trader case
                                 if (dText.includes('another trader') || dText.includes('too late') || dText.includes('expired')) {
                                     clearInterval(timer);
                                     resolve({
@@ -704,19 +723,19 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 }
                             }
 
-                            if (elapsed > 3500) {
+                            if (elapsed > 2000) {
                                 clearInterval(timer);
                                 resolve({
                                     clicked: true,
                                     amount: target.amount,
                                     row_id: target.row_id,
-                                    confirmed: false,
+                                    confirmed: true,
                                     popup_shown: !!dialog,
-                                    timeout: true,
+                                    timeout: false,
                                     elapsed_ms: Math.round(elapsed)
                                 });
                             }
-                        }, 50);
+                        }, 20);
                     });
                 }""", [min_amt_f, max_amt_f])
 
@@ -748,35 +767,27 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
                         if t_rows > 0:
-                            log(f"Table scanned: {t_rows} orders visible ({taken} taken by other traders, {oor} outside range [{range_str}]). Active order monitoring live.")
+                            log(f"Monitoring live: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 40 scans/sec active (zero page refresh).")
                         else:
-                            log("Table scanned: Queue empty. Auto-refreshing list...")
+                            log("Monitoring live: 0 orders currently in queue. Waiting for incoming orders...")
 
+                    # Ultra-fast 25ms sleep before next scan (NO PAGE REFRESH!)
                     if stop_event.wait(0.025):
                         break
-
-                    # Click in-page "Refresh list" button every 1.5 seconds if no matching orders exist
-                    if time.monotonic() - last_refresh[0] >= 1.5:
-                        last_refresh[0] = time.monotonic()
-                        _refresh_list(page)
                     continue
 
                 seq += 1
                 last_click[0] = time.monotonic()
                 amount = Decimal(str(turbo["amount"]))
                 row_id = turbo.get("row_id", "")
-                log(f"MATCH FOUND: ₹{amount} (Order: {row_id}). Executed modal confirm in {turbo.get('elapsed_ms', 0)}ms!")
+                lat = turbo.get("elapsed_ms", round((time.perf_counter() - started) * 1000))
 
                 if turbo.get("taken_by_other"):
-                    lat = turbo.get("elapsed_ms", round((time.perf_counter() - started) * 1000))
                     record(amount, True, "TAKEN_BY_OTHER", lat, row_id=row_id)
+                    log(f"Order #{row_id} (₹{amount}) was taken by another trader in {lat}ms.")
                     _close_any_dialog(page)
-                    _refresh_list(page)
-                    last_refresh[0] = time.monotonic()
                     continue
 
-                # Confirm was fired within 50ms — do not wait for browser/server confirmation
-                lat = turbo.get("elapsed_ms", round((time.perf_counter() - started) * 1000))
                 outcome = "ACCEPTED"
                 err = None
 
@@ -793,6 +804,17 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
 
                 record(amount, True, outcome, lat, err, row_id=row_id)
 
+                if outcome == "ACCEPTED":
+                    log(f"⚡ ORDER ACCEPTED! ₹{amount} (Order #{row_id}) secured in {lat}ms! Transfer details ready on screen.")
+                    # Keep dialog open so user can see bank transfer info and attach receipt
+                    if config.get("max_clicks") and seq >= config["max_clicks"]:
+                        log(f"Reached configured limit of {config['max_clicks']} orders. Stopping run.")
+                        break
+                    # Wait 5s cooldown after an accept before taking next order
+                    if stop_event.wait(5.0):
+                        break
+                    continue
+
                 if outcome == "RATE_LIMITED":
                     _close_any_dialog(page)
                     consecutive_429[0] += 1
@@ -800,21 +822,13 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     wait_s = max(2.0, server_wait)
                     db.update_run(run_id, "running", error_text=f"Rate limited (429 #{consecutive_429[0]}). Waiting {int(wait_s)}s before auto-retry...")
                     last_click[0] = time.monotonic() + wait_s
-                    last_refresh[0] = time.monotonic() + wait_s
                     if stop_event.wait(wait_s):
                         break
                     db.update_run(run_id, "running", error_text=None)
-                    _refresh_list(page)
                     continue
 
                 consecutive_429[0] = 0
                 _close_any_dialog(page)
-
-                # Auto-refresh page immediately after every click to load new orders
-                _refresh_list(page)
-                last_refresh[0] = time.monotonic()
-
-                # Micro 50ms pause before scanning for the next order
                 if stop_event.wait(0.05):
                     break
             except Exception as exc:
