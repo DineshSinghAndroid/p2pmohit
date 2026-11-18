@@ -257,23 +257,55 @@ def _watch_counts(page, state):
     page.on("response", on_resp)
 
 
-def _do_page_refresh(page) -> bool:
-    """25-second auto page reload: Refreshes the payouts list."""
+def _switch_to_tab(page, tab_name: str) -> bool:
+    """Click on a tab by name (e.g. 'in processing' or 'awaiting processing') without page reload."""
     try:
-        # Don't reload if the Accept confirmation modal is currently visible
-        if page.locator('[automation-id="autotest_modal_button_accept"]:visible').count() > 0:
-            return False
-        # If any other stray dialog is open, close it first
-        _close_any_dialog(page)
-        page.reload(wait_until="domcontentloaded", timeout=15_000)
-        page.wait_for_timeout(300)
-        return True
+        res = page.evaluate("""(targetName) => {
+            function norm(s) {
+                return (s || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim().toLowerCase();
+            }
+            function fireClick(el) {
+                if (!el) return;
+                try { el.scrollIntoView({ block: 'nearest' }); } catch(_) {}
+                try { el.focus(); } catch(_) {}
+                const opts = { bubbles: true, cancelable: true, composed: true, view: window };
+                const mouseOpts = { ...opts, buttons: 1, button: 0 };
+                try { el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts)); } catch(_) {}
+                try { el.dispatchEvent(new MouseEvent('mousedown', mouseOpts)); } catch(_) {}
+                try { el.dispatchEvent(new PointerEvent('pointerup', mouseOpts)); } catch(_) {}
+                try { el.dispatchEvent(new MouseEvent('mouseup', mouseOpts)); } catch(_) {}
+                try { el.dispatchEvent(new MouseEvent('click', mouseOpts)); } catch(_) {}
+                try { el.click(); } catch(_) {}
+            }
+            const target = norm(targetName);
+            const candidates = [
+                ...document.querySelectorAll('[role="tab"]'),
+                ...document.querySelectorAll('tui-tabs button, tui-tabs a, tui-tabs [role="tab"], .tui-tab'),
+                ...document.querySelectorAll('button, a, [role="button"]')
+            ];
+            for (const el of candidates) {
+                const text = norm(el.innerText || el.textContent || '');
+                if (text === target) {
+                    fireClick(el);
+                    return true;
+                }
+            }
+            for (const el of candidates) {
+                const text = norm(el.innerText || el.textContent || '');
+                if (text.includes(target) && text.length < target.length + 15) {
+                    fireClick(el);
+                    return true;
+                }
+            }
+            return false;
+        }""", tab_name)
+        return bool(res)
     except Exception:
         return False
 
 
-_tab_switch_refresh = _do_page_refresh
-_refresh_list = _do_page_refresh
+_tab_switch_refresh = lambda p: _switch_to_tab(p, "awaiting processing")
+_refresh_list = _tab_switch_refresh
 
 
 
@@ -445,7 +477,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
     """Keep accepting orders inside [min,max] until the user presses STOP."""
     seq = 0
     last_click = [0.0]
-    last_refresh = [time.monotonic()]
+    last_tab_switch = [time.monotonic()]
     last_heartbeat = [time.monotonic()]
     seen_skipped_ids = set()
     consecutive_429 = [0]
@@ -832,12 +864,19 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         oor = turbo.get("out_of_range_count", 0)
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
-                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 25s auto-refresh active.")
+                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 30s tab switch armed (5s stay).")
 
-                    if time.monotonic() - last_refresh[0] >= 25.0:
-                        last_refresh[0] = time.monotonic()
-                        log("🔄 25s auto-refresh: Reloading payouts page...")
-                        _do_page_refresh(page)
+                    if time.monotonic() - last_tab_switch[0] >= 30.0:
+                        last_tab_switch[0] = time.monotonic()
+                        # Only switch tabs if the Accept confirmation modal is not currently open
+                        if page.locator('[automation-id="autotest_modal_button_accept"]:visible').count() == 0:
+                            log("🔄 30s interval: Switching to 'In processing' tab (staying for 5s)...")
+                            _switch_to_tab(page, "in processing")
+                            if stop_event.wait(5.0):
+                                break
+                            log("🔄 5s elapsed: Switching back to 'Awaiting processing' tab. Monitoring resumed.")
+                            _switch_to_tab(page, "awaiting processing")
+                            last_tab_switch[0] = time.monotonic()
                         continue
 
                     if stop_event.wait(0.01):
