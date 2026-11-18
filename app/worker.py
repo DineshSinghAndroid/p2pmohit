@@ -258,7 +258,7 @@ def _watch_counts(page, state):
 
 
 def _do_page_refresh(page) -> bool:
-    """10-second auto page reload: Refreshes the payouts list."""
+    """25-second auto page reload: Refreshes the payouts list."""
     try:
         # Don't reload if the Accept confirmation modal is currently visible
         if page.locator('[automation-id="autotest_modal_button_accept"]:visible').count() > 0:
@@ -832,11 +832,11 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         oor = turbo.get("out_of_range_count", 0)
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
-                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 10s auto-refresh active.")
+                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 25s auto-refresh active.")
 
-                    if time.monotonic() - last_refresh[0] >= 10.0:
+                    if time.monotonic() - last_refresh[0] >= 25.0:
                         last_refresh[0] = time.monotonic()
-                        log("🔄 10s auto-refresh: Reloading payouts page...")
+                        log("🔄 25s auto-refresh: Reloading payouts page...")
                         _do_page_refresh(page)
                         continue
 
