@@ -481,17 +481,10 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                       "popup_shown": int(popup_shown), "outcome": outcome, "latency_ms": latency_ms,
                       "error_text": error_text or None})
 
+    log(f"0ms DOM MutationObserver scanner activated. Filter: ₹{int(min_amt_f):,}" if min_amt_f else "0ms DOM MutationObserver scanner activated. Filter: ₹0" + (f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"))
+
     while not stop_event.is_set():
         try:
-            _ensure_logged_in(page, config)
-            _close_any_dialog(page)
-            _close_chat_toast(page)
-
-            cooldown = max(0.01, (config.get("delay_ms") or 50) / 1000.0)
-            gap = cooldown - (time.monotonic() - last_click[0])
-            if gap > 0 and stop_event.wait(gap):
-                break
-
             started = time.perf_counter()
             popup_shown = False
             amount = Decimal(0)
@@ -499,248 +492,238 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
             try:
                 accept_resp.clear()
 
-                # ATOMIC SCAN, EXACT ROW AMOUNT VERIFICATION & 5ms CONFIRM CLICK
+                # IN-BROWSER 0ms SYNCHRONOUS MUTATION OBSERVER & FULL EVENT CLICKER
                 turbo = page.evaluate("""([minAmt, maxAmt]) => {
-                    function norm(s) {
-                        return (s || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim().toLowerCase();
-                    }
-
-                    function parseAmountFromElement(el) {
-                        if (!el) return null;
-                        const cleanNorm = (el.innerText || el.textContent || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim();
-                        const m = cleanNorm.match(/([\\d][\\d\\s\\u00a0\\u202f.,]*)\\s*INR/i) || cleanNorm.match(/₹\\s*([\\d][\\d\\s\\u00a0\\u202f.,]*)/i);
-                        if (!m) return null;
-                        let s = m[1].replace(/[\\s\\u00a0\\u202f]/g, '');
-                        if (s.includes(',') && s.includes('.')) {
-                            if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\\./g, '').replace(',', '.');
-                            else s = s.replace(/,/g, '');
-                        } else if (s.includes(',')) {
-                            s = s.replace(',', '.');
-                        }
-                        const val = parseFloat(s);
-                        return isNaN(val) ? null : val;
-                    }
-
-                    function parseRowAmount(tr) {
-                        const cells = tr.querySelectorAll('td, [role="cell"]');
-                        for (const cell of cells) {
-                            const val = parseAmountFromElement(cell);
-                            if (val !== null) return val;
-                        }
-                        return parseAmountFromElement(tr);
-                    }
-
-                    function extractRowId(tr) {
-                        if (tr.id) return tr.id;
-                        const autoId = tr.getAttribute('automation-id');
-                        if (autoId) return autoId;
-                        const link = tr.querySelector('a[href*="/payouts/"], a[href*="/order/"]');
-                        if (link && link.getAttribute('href')) {
-                            const parts = link.getAttribute('href').split('/');
-                            const last = parts[parts.length - 1];
-                            if (last) return last;
-                        }
-                        const cells = tr.querySelectorAll('td, th, [role="cell"]');
-                        for (const cell of cells) {
-                            const t = (cell.innerText || cell.textContent || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim();
-                            if (t && !t.includes('INR') && !t.includes('IMPS') && !t.includes('UPI') && !t.includes(':') && t.length > 2) {
-                                return t;
-                            }
-                        }
-                        if (cells.length > 0) {
-                            return (cells[0].innerText || cells[0].textContent || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim();
-                        }
-                        return '';
-                    }
-
-                    // 1. Scan rows in the payouts table directly
-                    const scannedRows = [...document.querySelectorAll('tbody tr, [role="row"], tr')].filter(r => {
-                        return r.querySelectorAll('td, [role="cell"]').length > 0;
-                    });
-
-                    let target = null;
-                    const skippedItems = [];
-                    let takenCount = 0;
-                    let outOfRangeCount = 0;
-
-                    for (const tr of scannedRows) {
-                        const btn = tr.querySelector('[automation-id="autotest_button_tradeAccept"]') ||
-                                    tr.querySelector('button, a[role="button"]');
-                        if (!btn) continue;
-
-                        const rowId = extractRowId(tr);
-                        const btnText = norm(btn.innerText || btn.textContent || '');
-                        const autoId = (btn.getAttribute('automation-id') || '').toLowerCase();
-                        const isTaken = btnText.includes('another trader') || btnText.includes('too late') ||
-                                        btnText.includes('expired') || btnText.includes('already');
-
-                        const amt = parseRowAmount(tr);
-
-                        if (isTaken) {
-                            takenCount++;
-                            skippedItems.push({
-                                row_id: rowId,
-                                amount: amt || 0,
-                                outcome: 'TAKEN_BY_OTHER',
-                                reason: 'Accepted by another trader'
-                            });
-                            continue;
-                        }
-
-                        if (btn.disabled || btn.getAttribute('aria-disabled') === 'true' ||
-                            (btn.classList && (btn.classList.contains('tui-button_disabled') || btn.classList.contains('_disabled')))) {
-                            continue;
-                        }
-
-                        const isEligible = btnText === 'accept for processing' ||
-                                           btnText === 'accept' ||
-                                           btnText.startsWith('accept') ||
-                                           btnText.includes('processing') ||
-                                           autoId === 'autotest_button_tradeaccept';
-
-                        if (!isEligible) continue;
-
-                        if (amt !== null) {
-                            if (minAmt !== null && amt < minAmt) {
-                                outOfRangeCount++;
-                                skippedItems.push({
-                                    row_id: rowId,
-                                    amount: amt,
-                                    outcome: 'SKIPPED',
-                                    reason: `Amount ₹${amt.toLocaleString('en-IN')} < Min ₹${minAmt.toLocaleString('en-IN')}`
-                                });
-                                continue;
-                            }
-                            if (maxAmt !== null && amt > maxAmt) {
-                                outOfRangeCount++;
-                                skippedItems.push({
-                                    row_id: rowId,
-                                    amount: amt,
-                                    outcome: 'SKIPPED',
-                                    reason: `Amount ₹${amt.toLocaleString('en-IN')} > Max ₹${maxAmt.toLocaleString('en-IN')}`
-                                });
-                                continue;
-                            }
-                        }
-
-                        // Eligible matching order found!
-                        target = {
-                            btn: btn,
-                            amount: amt || 0,
-                            row_id: rowId
-                        };
-                        break;
-                    }
-
-                    if (!target) {
-                        return Promise.resolve({
-                            clicked: false,
-                            reason: 'no_matching_row',
-                            total_rows: scannedRows.length,
-                            taken_count: takenCount,
-                            out_of_range_count: outOfRangeCount,
-                            skipped_items: skippedItems.slice(0, 10)
-                        });
-                    }
-
-                    // 2. Click the matching button immediately
-                    target.btn.click();
-                    const start = performance.now();
-
-                    // 3. High-frequency 20ms loop to confirm modal or detect instant success
                     return new Promise((resolve) => {
-                        const timer = setInterval(() => {
-                            const elapsed = performance.now() - start;
+                        let finished = false;
 
-                            // A. Check for confirmation modal button
-                            const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
-                                               [...document.querySelectorAll('section[role="dialog"] button, [role="dialog"] button')].find(b => {
-                                                   const t = norm(b.innerText || b.textContent || '');
-                                                   return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
-                                               });
-                            if (confirmBtn && !confirmBtn.disabled) {
-                                clearInterval(timer);
+                        function fireFullClick(el) {
+                            if (!el) return;
+                            try { el.focus(); } catch(_) {}
+                            try { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch(_) {}
+                            try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch(_) {}
+                            try { el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true })); } catch(_) {}
+                            try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); } catch(_) {}
+                            try { el.click(); } catch(_) {}
+                        }
 
-                                const dialog = document.querySelector('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden)');
-                                let finalAmount = target.amount;
-                                if (dialog) {
-                                    const modalAmt = parseAmountFromElement(dialog);
-                                    if (modalAmt !== null && modalAmt > 0) {
-                                        finalAmount = modalAmt;
+                        function norm(s) {
+                            return (s || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim().toLowerCase();
+                        }
+
+                        function parseAmount(text) {
+                            if (!text) return null;
+                            const clean = text.replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim();
+                            const m = clean.match(/([\\d][\\d\\s.,]*)\\s*INR/i) || clean.match(/₹\\s*([\\d][\\d\\s.,]*)/i);
+                            if (!m) return null;
+                            let s = m[1].replace(/[\\s\\u00a0\\u202f]/g, '');
+                            if (s.includes(',') && s.includes('.')) {
+                                if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\\./g, '').replace(',', '.');
+                                else s = s.replace(/,/g, '');
+                            } else if (s.includes(',')) {
+                                s = s.replace(',', '.');
+                            }
+                            const val = parseFloat(s);
+                            return isNaN(val) ? null : val;
+                        }
+
+                        function extractRowId(row) {
+                            if (row.id) return row.id;
+                            const autoId = row.getAttribute('automation-id');
+                            if (autoId) return autoId;
+                            const link = row.querySelector('a[href*="/payouts/"], a[href*="/order/"]');
+                            if (link && link.getAttribute('href')) {
+                                const parts = link.getAttribute('href').split('/');
+                                return parts[parts.length - 1];
+                            }
+                            const cells = row.querySelectorAll('td, th, [role="cell"]');
+                            for (const cell of cells) {
+                                const t = norm(cell.innerText || cell.textContent || '');
+                                if (t && !t.includes('inr') && !t.includes('imps') && !t.includes('upi') && !t.includes(':') && t.length > 2) {
+                                    return t;
+                                }
+                            }
+                            return '';
+                        }
+
+                        const skippedItems = [];
+                        let outOfRangeCount = 0;
+
+                        function checkPage() {
+                            if (finished) return;
+
+                            const buttons = document.querySelectorAll(
+                                '[automation-id="autotest_button_tradeAccept"], button, [role="button"], a'
+                            );
+
+                            for (const btn of buttons) {
+                                const text = norm(btn.innerText || btn.textContent || '');
+                                const autoId = (btn.getAttribute('automation-id') || '').toLowerCase();
+
+                                if (text.includes('another trader') || text.includes('too late') || text.includes('expired') || text.includes('already')) {
+                                    continue;
+                                }
+
+                                const isAccept = autoId === 'autotest_button_tradeaccept' ||
+                                                 text === 'accept for processing' ||
+                                                 text === 'accept' ||
+                                                 text.startsWith('accept') ||
+                                                 text.includes('processing');
+
+                                if (!isAccept) continue;
+                                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+
+                                const row = btn.closest('tr, [role="row"], .tui-table__tr, li') || btn.parentElement.parentElement;
+                                const rowText = row ? (row.innerText || row.textContent || '') : '';
+                                const amt = parseAmount(rowText) || parseAmount(btn.innerText || '');
+                                const rowId = row ? extractRowId(row) : '';
+
+                                if (amt !== null) {
+                                    if (minAmt !== null && amt < minAmt) {
+                                        outOfRangeCount++;
+                                        skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} < Min ₹${minAmt}` });
+                                        continue;
+                                    }
+                                    if (maxAmt !== null && amt > maxAmt) {
+                                        outOfRangeCount++;
+                                        skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} > Max ₹${maxAmt}` });
+                                        continue;
                                     }
                                 }
 
-                                confirmBtn.click();
-                                resolve({
-                                    clicked: true,
-                                    amount: finalAmount,
-                                    row_id: target.row_id,
-                                    confirmed: true,
-                                    popup_shown: true,
-                                    elapsed_ms: Math.round(elapsed)
-                                });
+                                // 0ms TARGET HIT!
+                                finished = true;
+                                cleanup();
+                                fireFullClick(btn);
+                                const startTime = performance.now();
+
+                                const modalTimer = setInterval(() => {
+                                    const elapsed = performance.now() - startTime;
+
+                                    const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
+                                                       [...document.querySelectorAll('section[role="dialog"] button, [role="dialog"] button')].find(b => {
+                                                           const t = norm(b.innerText || b.textContent || '');
+                                                           return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
+                                                       });
+                                    if (confirmBtn && !confirmBtn.disabled) {
+                                        clearInterval(modalTimer);
+                                        fireFullClick(confirmBtn);
+                                        resolve({
+                                            clicked: true,
+                                            confirmed: true,
+                                            popup_shown: true,
+                                            amount: amt || 0,
+                                            row_id: rowId,
+                                            elapsed_ms: Math.round(elapsed)
+                                        });
+                                        return;
+                                    }
+
+                                    const dialog = document.querySelector('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden)');
+                                    if (dialog) {
+                                        const dText = norm(dialog.innerText || dialog.textContent || '');
+                                        if (dText.includes('processing of the request') || dText.includes('make and confirm the transfer') || dText.includes('payment method')) {
+                                            clearInterval(modalTimer);
+                                            const modalAmt = parseAmount(dialog.innerText || dialog.textContent || '');
+                                            resolve({
+                                                clicked: true,
+                                                confirmed: true,
+                                                popup_shown: true,
+                                                processing_opened: true,
+                                                amount: modalAmt || amt || 0,
+                                                row_id: rowId,
+                                                elapsed_ms: Math.round(elapsed)
+                                            });
+                                            return;
+                                        }
+                                        if (dText.includes('another trader') || dText.includes('too late') || dText.includes('expired')) {
+                                            clearInterval(modalTimer);
+                                            resolve({
+                                                clicked: true,
+                                                confirmed: false,
+                                                popup_shown: true,
+                                                taken_by_other: true,
+                                                amount: amt || 0,
+                                                row_id: rowId,
+                                                elapsed_ms: Math.round(elapsed)
+                                            });
+                                            return;
+                                        }
+                                    }
+
+                                    if (elapsed > 2000) {
+                                        clearInterval(modalTimer);
+                                        resolve({
+                                            clicked: true,
+                                            confirmed: true,
+                                            popup_shown: !!dialog,
+                                            amount: amt || 0,
+                                            row_id: rowId,
+                                            elapsed_ms: Math.round(elapsed)
+                                        });
+                                    }
+                                }, 10);
+
                                 return;
                             }
+                        }
 
-                            // B. Check if dialog opened
-                            const dialog = document.querySelector('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden)');
-                            if (dialog) {
-                                const dText = norm(dialog.innerText || dialog.textContent || '');
+                        let observer = null;
+                        try {
+                            observer = new MutationObserver(() => checkPage());
+                            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                        } catch (_) {}
 
-                                // Success case: Order details dialog "Processing of the request" opened!
-                                if (dText.includes('processing of the request') || dText.includes('make and confirm the transfer') || dText.includes('payment method')) {
-                                    clearInterval(timer);
-                                    let finalAmount = target.amount;
-                                    const modalAmt = parseAmountFromElement(dialog);
-                                    if (modalAmt !== null && modalAmt > 0) {
-                                        finalAmount = modalAmt;
-                                    }
-                                    resolve({
-                                        clicked: true,
-                                        amount: finalAmount,
-                                        row_id: target.row_id,
-                                        confirmed: true,
-                                        popup_shown: true,
-                                        processing_opened: true,
-                                        elapsed_ms: Math.round(elapsed)
-                                    });
-                                    return;
-                                }
+                        const scanInterval = setInterval(checkPage, 25);
+                        checkPage();
 
-                                // Taken by another trader case
-                                if (dText.includes('another trader') || dText.includes('too late') || dText.includes('expired')) {
-                                    clearInterval(timer);
-                                    resolve({
-                                        clicked: true,
-                                        amount: target.amount,
-                                        row_id: target.row_id,
-                                        confirmed: false,
-                                        popup_shown: true,
-                                        taken_by_other: true,
-                                        elapsed_ms: Math.round(elapsed)
-                                    });
-                                    return;
-                                }
+                        function cleanup() {
+                            if (observer) {
+                                try { observer.disconnect(); } catch(_) {}
                             }
+                            clearInterval(scanInterval);
+                            clearTimeout(timeoutTimer);
+                        }
 
-                            if (elapsed > 2000) {
-                                clearInterval(timer);
+                        const timeoutTimer = setTimeout(() => {
+                            if (!finished) {
+                                finished = true;
+                                cleanup();
+
+                                const allRows = document.querySelectorAll('tbody tr, [role="row"], tr');
+                                const allBtns = document.querySelectorAll('button, [role="button"]');
+                                let taken = 0;
+                                allBtns.forEach(b => {
+                                    const t = norm(b.innerText || b.textContent || '');
+                                    if (t.includes('another trader')) taken++;
+                                });
+
+                                let banner = '';
+                                const warningEl = document.querySelector('.tui-notification, [role="alert"]');
+                                if (warningEl) {
+                                    const wt = (warningEl.innerText || '').trim();
+                                    if (wt.includes('500 USDT') || wt.includes('suspended')) {
+                                        banner = wt;
+                                    }
+                                }
+
                                 resolve({
-                                    clicked: true,
-                                    amount: target.amount,
-                                    row_id: target.row_id,
-                                    confirmed: true,
-                                    popup_shown: !!dialog,
-                                    timeout: false,
-                                    elapsed_ms: Math.round(elapsed)
+                                    clicked: false,
+                                    total_rows: allRows.length,
+                                    taken_count: taken,
+                                    out_of_range_count: outOfRangeCount,
+                                    skipped_items: skippedItems.slice(0, 5),
+                                    warning: banner
                                 });
                             }
-                        }, 20);
+                        }, 2500);
                     });
                 }""", [min_amt_f, max_amt_f])
 
                 if not turbo.get("clicked"):
-                    # Record newly seen skipped orders so user sees them in Click Log and counters
+                    if turbo.get("warning"):
+                        log(f"⚠️ TARGET SITE ALERT: {turbo['warning']}", level="WARN")
+
                     for item in turbo.get("skipped_items", []):
                         r_id = item.get("row_id") or f"row_{item.get('amount')}"
                         if r_id not in seen_skipped_ids:
@@ -758,7 +741,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             )
                             log(f"Skipped order {r_id} (₹{amt_val}): {item.get('reason')}")
 
-                    # Heartbeat log every 3 seconds
                     if time.monotonic() - last_heartbeat[0] >= 3.0:
                         last_heartbeat[0] = time.monotonic()
                         t_rows = turbo.get("total_rows", 0)
@@ -766,13 +748,9 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         oor = turbo.get("out_of_range_count", 0)
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
-                        if t_rows > 0:
-                            log(f"Monitoring live: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 40 scans/sec active (zero page refresh).")
-                        else:
-                            log("Monitoring live: 0 orders currently in queue. Waiting for incoming orders...")
+                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 0ms instant trigger armed.")
 
-                    # Ultra-fast 25ms sleep before next scan (NO PAGE REFRESH!)
-                    if stop_event.wait(0.025):
+                    if stop_event.wait(0.01):
                         break
                     continue
 
@@ -791,7 +769,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 outcome = "ACCEPTED"
                 err = None
 
-                # Check if an immediate HTTP error occurred
                 if accept_resp:
                     limited = next((item for item in accept_resp if item[0] == 429), None)
                     status, body, retry_after = limited or accept_resp[-1]
@@ -805,8 +782,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 record(amount, True, outcome, lat, err, row_id=row_id)
 
                 if outcome == "ACCEPTED":
-                    log(f"⚡ ORDER ACCEPTED! ₹{amount} (Order #{row_id}) secured in {lat}ms! Transfer details ready on screen.")
-                    # Keep dialog open so user can see bank transfer info and attach receipt
+                    log(f"⚡ ORDER ACCEPTED! ₹{amount} (Order #{row_id}) secured in {lat}ms! Transfer details ready.")
                     if config.get("max_clicks") and seq >= config["max_clicks"]:
                         log(f"Reached configured limit of {config['max_clicks']} orders. Stopping run.")
                         break
@@ -840,7 +816,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     pass
                 _close_any_dialog(page)
         except Exception:
-            if stop_event.wait(1.0):
+            if stop_event.wait(0.5):
                 break
 
 
