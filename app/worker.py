@@ -257,12 +257,21 @@ def _watch_counts(page, state):
     page.on("response", on_resp)
 
 
-def _tab_switch_refresh(page) -> bool:
-    """Steady zero-refresh mode: Stays continuously on orders list without tab switching or page reloads."""
-    return True
+def _do_page_refresh(page) -> bool:
+    """10-second auto page reload: Refreshes the payouts list."""
+    try:
+        # Don't reload if an order modal/dialog is currently visible
+        if page.locator('section[role="dialog"], [role="dialog"], .tui-dialog').count() > 0:
+            return False
+        page.reload(wait_until="domcontentloaded", timeout=15_000)
+        page.wait_for_timeout(300)
+        return True
+    except Exception:
+        return False
 
 
-_refresh_list = _tab_switch_refresh
+_tab_switch_refresh = _do_page_refresh
+_refresh_list = _do_page_refresh
 
 
 
@@ -789,7 +798,13 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         oor = turbo.get("out_of_range_count", 0)
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
-                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). Steady zero-refresh mode (watching Row 1).")
+                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 10s auto-refresh active.")
+
+                    if time.monotonic() - last_refresh[0] >= 10.0:
+                        last_refresh[0] = time.monotonic()
+                        log("🔄 10s auto-refresh: Reloading payouts page...")
+                        _do_page_refresh(page)
+                        continue
 
                     if stop_event.wait(0.01):
                         break
