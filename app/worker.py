@@ -258,84 +258,8 @@ def _watch_counts(page, state):
 
 
 def _tab_switch_refresh(page) -> bool:
-    """Recalls the payouts API by switching tabs ('In processing' -> 'Awaiting processing').
-
-    This avoids destructive hard page reloads and instantly triggers Angular's
-    internal HTTP data fetch without unmounting the DOM or dropping WebSocket state.
-    """
-    try:
-        switched = page.evaluate("""() => {
-            return new Promise((resolve) => {
-                function fireFullClick(el) {
-                    if (!el) return;
-                    try { el.focus(); } catch(_) {}
-                    try { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch(_) {}
-                    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch(_) {}
-                    try { el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true })); } catch(_) {}
-                    try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); } catch(_) {}
-                    try { el.click(); } catch(_) {}
-                }
-
-                function norm(s) {
-                    return (s || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim().toLowerCase();
-                }
-
-                function findTabElement(targetName) {
-                    const target = norm(targetName);
-                    const all = [...document.querySelectorAll('*')];
-                    for (const el of all) {
-                        const text = norm(el.innerText || el.textContent || '');
-                        if (text === target) {
-                            const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '') === target);
-                            if (!hasChildMatch) {
-                                const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
-                                return clickable || el;
-                            }
-                        }
-                    }
-                    for (const el of all) {
-                        const text = norm(el.innerText || el.textContent || '');
-                        if (text.includes(target) && text.length < target.length + 25) {
-                            const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '').includes(target));
-                            if (!hasChildMatch) {
-                                const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
-                                return clickable || el;
-                            }
-                        }
-                    }
-                    return null;
-                }
-
-                const inProcessingTab = findTabElement('in processing');
-                const awaitingTab = findTabElement('awaiting processing');
-
-                if (inProcessingTab && awaitingTab) {
-                    fireFullClick(inProcessingTab);
-                    setTimeout(() => {
-                        fireFullClick(awaitingTab);
-                        resolve({ switched: true, method: 'in_processing_to_awaiting' });
-                    }, 200);
-                } else if (awaitingTab) {
-                    fireFullClick(awaitingTab);
-                    resolve({ switched: true, method: 'awaiting_only' });
-                } else {
-                    const btns = [...document.querySelectorAll('button, a[role="button"]')];
-                    const ref = btns.find(b => {
-                        const text = norm(b.innerText || b.textContent || '');
-                        return text === 'refresh list' || text.includes('refresh');
-                    });
-                    if (ref) {
-                        fireFullClick(ref);
-                        resolve({ switched: true, method: 'refresh_button' });
-                    } else {
-                        resolve({ switched: false, method: 'tabs_not_found' });
-                    }
-                }
-            });
-        }""")
-        return bool(switched and switched.get("switched"))
-    except Exception:
-        return False
+    """Steady zero-refresh mode: Stays continuously on orders list without tab switching or page reloads."""
+    return True
 
 
 _refresh_list = _tab_switch_refresh
@@ -546,7 +470,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         let finished = false;
                         let timeoutTimer = null;
                         let scanInterval = null;
-                        let tabSwitchInterval = null;
                         let modalTimer = null;
                         let observer = null;
 
@@ -761,65 +684,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 return;
                         }
 
-                        function findTabElement(targetName) {
-                            const target = norm(targetName);
-                            const all = [...document.querySelectorAll('*')];
-                            for (const el of all) {
-                                const text = norm(el.innerText || el.textContent || '');
-                                if (text === target) {
-                                    const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '') === target);
-                                    if (!hasChildMatch) {
-                                        const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
-                                        return clickable || el;
-                                    }
-                                }
-                            }
-                            for (const el of all) {
-                                const text = norm(el.innerText || el.textContent || '');
-                                if (text.includes(target) && text.length < target.length + 25) {
-                                    const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '').includes(target));
-                                    if (!hasChildMatch) {
-                                        const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
-                                        return clickable || el;
-                                    }
-                                }
-                            }
-                            return null;
-                        }
-
-                        let tabSwitchesCount = 0;
-                        let lastTabMethod = '';
-
-                        function doTabSwitch() {
-                            if (finished) return;
-                            const inProcessingTab = findTabElement('in processing');
-                            const awaitingTab = findTabElement('awaiting processing');
-                            if (inProcessingTab && awaitingTab) {
-                                fireFullClick(inProcessingTab);
-                                tabSwitchesCount++;
-                                lastTabMethod = 'switched_in_proc_and_awaiting';
-                                setTimeout(() => {
-                                    if (!finished) {
-                                        fireFullClick(awaitingTab);
-                                    }
-                                }, 200);
-                            } else if (awaitingTab) {
-                                fireFullClick(awaitingTab);
-                                tabSwitchesCount++;
-                                lastTabMethod = 'clicked_awaiting';
-                            } else {
-                                const btns = [...document.querySelectorAll('button, a[role="button"]')];
-                                const ref = btns.find(b => norm(b.innerText || b.textContent || '').includes('refresh'));
-                                if (ref) {
-                                    fireFullClick(ref);
-                                    tabSwitchesCount++;
-                                    lastTabMethod = 'clicked_refresh_btn';
-                                } else {
-                                    lastTabMethod = 'tabs_not_found';
-                                }
-                            }
-                        }
-
                         try {
                             observer = new MutationObserver(() => checkPage());
                             observer.observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -834,10 +698,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 clearInterval(scanInterval);
                                 scanInterval = null;
                             }
-                            if (tabSwitchInterval) {
-                                clearInterval(tabSwitchInterval);
-                                tabSwitchInterval = null;
-                            }
                             if (timeoutTimer) {
                                 clearTimeout(timeoutTimer);
                                 timeoutTimer = null;
@@ -848,10 +708,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             }
                         }
 
-                        scanInterval = setInterval(checkPage, 25);
-                        tabSwitchInterval = setInterval(() => {
-                            if (!finished) doTabSwitch();
-                        }, 1200);
+                        scanInterval = setInterval(checkPage, 20);
                         checkPage();
 
                         timeoutTimer = setTimeout(() => {
@@ -882,9 +739,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                     taken_count: taken,
                                     out_of_range_count: outOfRangeCount,
                                     skipped_items: skippedItems.slice(0, 5),
-                                    warning: banner,
-                                    tab_switches: tabSwitchesCount,
-                                    tab_method: lastTabMethod
+                                    warning: banner
                                 });
                             }
                         }, 2500);
@@ -894,12 +749,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 if not turbo.get("clicked"):
                     if turbo.get("warning"):
                         log(f"⚠️ TARGET SITE ALERT: {turbo['warning']}", level="WARN")
-
-                    if turbo.get("tab_switches", 0) > 0:
-                        method = turbo.get("tab_method", "ok")
-                        log(f"🔄 Tab switch active: {method} ({turbo['tab_switches']}x). API recalled.")
-                    elif turbo.get("tab_method") == "tabs_not_found":
-                        log("⚠️ Target tabs ('In processing' / 'Awaiting processing') not detected in DOM.", level="WARN")
 
                     for item in turbo.get("skipped_items", []):
                         r_id = item.get("row_id") or f"row_{item.get('amount')}"
@@ -925,7 +774,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         oor = turbo.get("out_of_range_count", 0)
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
-                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). Tab switch armed (recalls API without reload).")
+                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). Steady zero-refresh mode (watching Row 1).")
 
                     if stop_event.wait(0.01):
                         break
@@ -941,7 +790,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     record(amount, True, "TAKEN_BY_OTHER", lat, row_id=row_id)
                     log(f"Order #{row_id} (₹{amount}) was taken by another trader in {lat}ms.")
                     _close_any_dialog(page)
-                    _tab_switch_refresh(page)
                     continue
 
                 outcome = "ACCEPTED"
@@ -967,7 +815,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     # Wait 5s cooldown after an accept before taking next order
                     if stop_event.wait(5.0):
                         break
-                    _tab_switch_refresh(page)
                     continue
 
                 if outcome == "RATE_LIMITED":
@@ -980,12 +827,10 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     if stop_event.wait(wait_s):
                         break
                     db.update_run(run_id, "running", error_text=None)
-                    _tab_switch_refresh(page)
                     continue
 
                 consecutive_429[0] = 0
                 _close_any_dialog(page)
-                _tab_switch_refresh(page)
                 if stop_event.wait(0.05):
                     break
             except Exception as exc:
