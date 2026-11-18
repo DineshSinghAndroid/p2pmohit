@@ -258,7 +258,36 @@ def _watch_counts(page, state):
 
 
 def _switch_to_tab(page, tab_name: str) -> bool:
-    """Click on a tab by name (e.g. 'in processing' or 'awaiting processing') without page reload."""
+    """Click on a tab by name (e.g. 'In processing' or 'Awaiting processing') without page reload."""
+    pattern = re.compile(rf"^\s*{re.escape(tab_name)}", re.IGNORECASE)
+
+    # 1. Try Playwright native locators (triggers trusted browser mouse clicks)
+    selectors = [
+        f'tui-tabs [role="tab"]:has-text("{tab_name}")',
+        f'[role="tab"]:has-text("{tab_name}")',
+        f'tui-tab:has-text("{tab_name}")',
+        f'.tui-tab:has-text("{tab_name}")',
+        f'button:has-text("{tab_name}")',
+        f'a:has-text("{tab_name}")',
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() and loc.is_visible(timeout=300):
+                loc.click(timeout=1_500)
+                return True
+        except Exception:
+            pass
+
+    try:
+        tab_loc = page.get_by_role("tab", name=pattern)
+        if tab_loc.count() and tab_loc.first.is_visible(timeout=300):
+            tab_loc.first.click(timeout=1_500)
+            return True
+    except Exception:
+        pass
+
+    # 2. Comprehensive in-browser DOM locator fallback
     try:
         res = page.evaluate("""(targetName) => {
             function norm(s) {
@@ -269,31 +298,21 @@ def _switch_to_tab(page, tab_name: str) -> bool:
                 try { el.scrollIntoView({ block: 'nearest' }); } catch(_) {}
                 try { el.focus(); } catch(_) {}
                 const opts = { bubbles: true, cancelable: true, composed: true, view: window };
-                const mouseOpts = { ...opts, buttons: 1, button: 0 };
-                try { el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts)); } catch(_) {}
-                try { el.dispatchEvent(new MouseEvent('mousedown', mouseOpts)); } catch(_) {}
-                try { el.dispatchEvent(new PointerEvent('pointerup', mouseOpts)); } catch(_) {}
-                try { el.dispatchEvent(new MouseEvent('mouseup', mouseOpts)); } catch(_) {}
-                try { el.dispatchEvent(new MouseEvent('click', mouseOpts)); } catch(_) {}
+                const mOpts = { ...opts, buttons: 1, button: 0 };
+                try { el.dispatchEvent(new PointerEvent('pointerdown', mOpts)); } catch(_) {}
+                try { el.dispatchEvent(new MouseEvent('mousedown', mOpts)); } catch(_) {}
+                try { el.dispatchEvent(new PointerEvent('pointerup', mOpts)); } catch(_) {}
+                try { el.dispatchEvent(new MouseEvent('mouseup', mOpts)); } catch(_) {}
+                try { el.dispatchEvent(new MouseEvent('click', mOpts)); } catch(_) {}
                 try { el.click(); } catch(_) {}
             }
             const target = norm(targetName);
-            const candidates = [
-                ...document.querySelectorAll('[role="tab"]'),
-                ...document.querySelectorAll('tui-tabs button, tui-tabs a, tui-tabs [role="tab"], .tui-tab'),
-                ...document.querySelectorAll('button, a, [role="button"]')
-            ];
-            for (const el of candidates) {
+            const all = [...document.querySelectorAll('tui-tabs *, tui-tab, [role="tab"], .tui-tab, button, a, div, span')];
+            for (const el of all) {
                 const text = norm(el.innerText || el.textContent || '');
-                if (text === target) {
-                    fireClick(el);
-                    return true;
-                }
-            }
-            for (const el of candidates) {
-                const text = norm(el.innerText || el.textContent || '');
-                if (text.includes(target) && text.length < target.length + 15) {
-                    fireClick(el);
+                if (text.startsWith(target) && text.length < target.length + 20) {
+                    const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]') || el;
+                    fireClick(clickable);
                     return true;
                 }
             }
@@ -870,12 +889,20 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         last_tab_switch[0] = time.monotonic()
                         # Only switch tabs if the Accept confirmation modal is not currently open
                         if page.locator('[automation-id="autotest_modal_button_accept"]:visible').count() == 0:
-                            log("🔄 30s interval: Switching to 'In processing' tab (staying for 5s)...")
-                            _switch_to_tab(page, "in processing")
+                            switched_in = _switch_to_tab(page, "In processing")
+                            if switched_in:
+                                log("🔄 30s interval: Switched to 'In processing' tab (staying for 5s)...")
+                            else:
+                                log("⚠️ Failed to switch to 'In processing' tab (element not clickable).", level="WARN")
+
                             if stop_event.wait(5.0):
                                 break
-                            log("🔄 5s elapsed: Switching back to 'Awaiting processing' tab. Monitoring resumed.")
-                            _switch_to_tab(page, "awaiting processing")
+
+                            switched_back = _switch_to_tab(page, "Awaiting processing")
+                            if switched_back:
+                                log("🔄 5s elapsed: Switched back to 'Awaiting processing' tab. Monitoring resumed.")
+                            else:
+                                log("⚠️ Failed to switch back to 'Awaiting processing' tab.", level="WARN")
                             last_tab_switch[0] = time.monotonic()
                         continue
 
