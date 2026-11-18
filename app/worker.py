@@ -611,50 +611,85 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         function checkPage() {
                             if (finished) return;
 
-                            const buttons = document.querySelectorAll(
-                                '[automation-id="autotest_button_tradeAccept"], button, [role="button"], a'
-                            );
-
-                            for (const btn of buttons) {
-                                const text = norm(btn.innerText || btn.textContent || '');
-                                const autoId = (btn.getAttribute('automation-id') || '').toLowerCase();
-
-                                if (text.includes('another trader') || text.includes('too late') || text.includes('expired') || text.includes('already')) {
-                                    continue;
-                                }
-
-                                const isAccept = autoId === 'autotest_button_tradeaccept' ||
-                                                 text === 'accept for processing' ||
-                                                 text === 'accept' ||
-                                                 text.startsWith('accept') ||
-                                                 text.includes('processing');
-
-                                if (!isAccept) continue;
-                                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
-
-                                const row = btn.closest('tr, [role="row"], .tui-table__tr, li') || btn.parentElement.parentElement;
-                                const rowText = row ? (row.innerText || row.textContent || '') : '';
-                                const amt = parseAmount(rowText) || parseAmount(btn.innerText || '');
-                                const rowId = row ? extractRowId(row) : '';
-
-                                if (amt !== null) {
-                                    if (minAmt !== null && amt < minAmt) {
-                                        outOfRangeCount++;
-                                        skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} < Min ₹${minAmt}` });
-                                        continue;
-                                    }
-                                    if (maxAmt !== null && amt > maxAmt) {
-                                        outOfRangeCount++;
-                                        skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} > Max ₹${maxAmt}` });
-                                        continue;
-                                    }
-                                }
-
-                                // 0ms TARGET HIT!
+                            // 1. If confirmation modal is open, click accept immediately
+                            const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
+                                               [...document.querySelectorAll('section[role="dialog"] button, [role="dialog"] button, .tui-dialog button')].find(b => {
+                                                   const t = norm(b.innerText || b.textContent || '');
+                                                   return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
+                                               });
+                            if (confirmBtn && !confirmBtn.disabled) {
                                 finished = true;
                                 cleanup();
-                                fireFullClick(btn);
-                                const startTime = performance.now();
+                                fireFullClick(confirmBtn);
+                                resolve({
+                                    clicked: true,
+                                    confirmed: true,
+                                    popup_shown: true,
+                                    amount: 0,
+                                    row_id: 'modal_confirmed',
+                                    elapsed_ms: 10
+                                });
+                                return;
+                            }
+
+                            // 2. LASER TARGET: ONLY ROW 1 (THE TOP / NEWEST ORDER IN TABLE)
+                            const allRows = document.querySelectorAll('tbody tr, [role="row"], tr');
+                            let topRow = null;
+                            for (const tr of allRows) {
+                                if (tr.querySelector('th')) continue;
+                                const text = norm(tr.innerText || tr.textContent || '');
+                                if (text.includes('application received') || text.includes('waiting time') || (text.includes('payment method') && !text.includes('inr'))) {
+                                    continue;
+                                }
+                                topRow = tr;
+                                break;
+                            }
+
+                            if (!topRow) return;
+
+                            const btn = topRow.querySelector('[automation-id="autotest_button_tradeAccept"], button, [role="button"], a');
+                            if (!btn) return;
+
+                            const btnText = norm(btn.innerText || btn.textContent || '');
+                            const autoId = (btn.getAttribute('automation-id') || '').toLowerCase();
+
+                            // If Row 1 is already taken by another trader, DO NOT check lower rows!
+                            if (btnText.includes('another trader') || btnText.includes('too late') || btnText.includes('expired') || btnText.includes('already')) {
+                                return;
+                            }
+
+                            const isAccept = autoId === 'autotest_button_tradeaccept' ||
+                                             btnText === 'accept for processing' ||
+                                             btnText === 'accept' ||
+                                             btnText.startsWith('accept') ||
+                                             btnText.includes('processing');
+
+                            if (!isAccept || btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
+                                return;
+                            }
+
+                            const rowText = topRow.innerText || topRow.textContent || '';
+                            const amt = parseAmount(rowText) || parseAmount(btn.innerText || '');
+                            const rowId = extractRowId(topRow);
+
+                            if (amt !== null) {
+                                if (minAmt !== null && amt < minAmt) {
+                                    outOfRangeCount++;
+                                    skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} < Min ₹${minAmt}` });
+                                    return; // Top order out of range; wait for next top order
+                                }
+                                if (maxAmt !== null && amt > maxAmt) {
+                                    outOfRangeCount++;
+                                    skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} > Max ₹${maxAmt}` });
+                                    return; // Top order out of range; wait for next top order
+                                }
+                            }
+
+                            // 0ms LASER HIT ON TOP ORDER!
+                            finished = true;
+                            cleanup();
+                            fireFullClick(btn);
+                            const startTime = performance.now();
 
                                 modalTimer = setInterval(() => {
                                     const elapsed = performance.now() - startTime;
@@ -1106,20 +1141,38 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                     return
                 read_request = (response.url, headers)
 
+            def log(msg: str, level: str = "INFO"):
+                if hasattr(db, "add_log"):
+                    try:
+                        db.add_log(run_id, msg, level)
+                    except Exception:
+                        pass
+
             page.on("response", _remember_payout_read)
             def _on_accept(response):
                 try:
-                    if response.request.method in ("POST", "PUT", "PATCH") and "/api/" in response.url and "login" not in response.url:
-                        if response.status == 429:
-                            path = urlparse(response.url).path[:150]
-                            details = [f"Site returned HTTP 429 on {response.request.method} {path}"]
-                            for name in ("retry-after", "cf-ray", "x-request-id"):
-                                value = response.headers.get(name)
-                                if value:
-                                    details.append(f"{name}: {value[:80]}")
-                            accept_resp.append((429, _redact(" · ".join(details), config), response.headers.get("retry-after")))
-                        else:
-                            accept_resp.append((response.status, response.text()[:300], None))
+                    req = response.request
+                    if "/api/" in response.url and "login" not in response.url:
+                        u_path = urlparse(response.url).path
+                        if req.method in ("POST", "PUT", "PATCH") or "payout" in u_path:
+                            snippet = ""
+                            try:
+                                snippet = response.text()[:200].replace("\n", " ")
+                            except Exception:
+                                pass
+                            log(f"🌐 API {req.method} {u_path} -> HTTP {response.status} | {snippet}")
+
+                        if req.method in ("POST", "PUT", "PATCH"):
+                            if response.status == 429:
+                                path = urlparse(response.url).path[:150]
+                                details = [f"Site returned HTTP 429 on {response.request.method} {path}"]
+                                for name in ("retry-after", "cf-ray", "x-request-id"):
+                                    value = response.headers.get(name)
+                                    if value:
+                                        details.append(f"{name}: {value[:80]}")
+                                accept_resp.append((429, _redact(" · ".join(details), config), response.headers.get("retry-after")))
+                            else:
+                                accept_resp.append((response.status, response.text()[:300], None))
                 except Exception:
                     pass
             page.on("response", _on_accept)
@@ -1128,12 +1181,6 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
             parsed = urlparse(config["site_url"])
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("Site URL must be a valid http or https URL")
-            def log(msg: str, level: str = "INFO"):
-                if hasattr(db, "add_log"):
-                    try:
-                        db.add_log(run_id, msg, level)
-                    except Exception:
-                        pass
 
             log(f"Worker started. Headless: {headless}, Stealth: {stealth}, Proxy: {'Yes' if proxy_cfg else 'Direct'}")
             origin = f"{parsed.scheme}://{parsed.netloc}"
