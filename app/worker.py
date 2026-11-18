@@ -492,8 +492,10 @@ def _ensure_logged_in(page, config) -> None:
         pass
 
 
-def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accept_resp, js_errors, server_errors, min_amount, max_amount):
+def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accept_resp, js_errors, server_errors, min_amount, max_amount, handled_order_ids=None):
     """Keep accepting orders inside [min,max] until the user presses STOP."""
+    if handled_order_ids is None:
+        handled_order_ids = set()
     seq = 0
     last_click = [0.0]
     last_tab_switch = [time.monotonic()]
@@ -528,7 +530,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 accept_resp.clear()
 
                 # IN-BROWSER 0ms SYNCHRONOUS MUTATION OBSERVER & FULL EVENT CLICKER
-                turbo = page.evaluate("""([minAmt, maxAmt]) => {
+                turbo = page.evaluate("""([minAmt, maxAmt, handledList]) => {
                     return new Promise((resolve) => {
                         let finished = false;
                         let timeoutTimer = null;
@@ -537,6 +539,11 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         let observer = null;
                         let orderListener = null;
                         let takenListener = null;
+
+                        window._p2pHandledOrderIds = window._p2pHandledOrderIds || new Set();
+                        if (Array.isArray(handledList)) {
+                            handledList.forEach(id => { if (id) window._p2pHandledOrderIds.add(id); });
+                        }
 
                         function fireFullClick(el) {
                             if (!el) return;
@@ -575,22 +582,56 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         }
 
                         function extractRowId(row) {
-                            if (row.id) return row.id;
-                            const autoId = row.getAttribute('automation-id');
-                            if (autoId) return autoId;
+                            if (!row) return '';
+                            // 1. UUID in outerHTML
+                            const uuidMatch = (row.outerHTML || '').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+                            if (uuidMatch) return uuidMatch[0];
+
+                            // 2. id / automation-id / data-id
+                            if (row.id && row.id.length > 3) return row.id;
+                            const autoId = row.getAttribute('automation-id') || row.getAttribute('data-id');
+                            if (autoId && autoId.length > 3) return autoId;
+
+                            // 3. Link href
                             const link = row.querySelector('a[href*="/payouts/"], a[href*="/order/"]');
                             if (link && link.getAttribute('href')) {
                                 const parts = link.getAttribute('href').split('/');
-                                return parts[parts.length - 1];
+                                const lastPart = parts[parts.length - 1];
+                                if (lastPart && lastPart.length > 3) return lastPart;
                             }
+
+                            // 4. Stable row signature excluding button text
                             const cells = row.querySelectorAll('td, th, [role="cell"]');
+                            const parts = [];
                             for (const cell of cells) {
+                                if (cell.querySelector('button, [role="button"], a')) continue;
                                 const t = norm(cell.innerText || cell.textContent || '');
-                                if (t && !t.includes('inr') && !t.includes('imps') && !t.includes('upi') && !t.includes(':') && t.length > 2) {
-                                    return t;
+                                if (t && t.length > 1 && !t.includes('accept') && !t.includes('process')) {
+                                    parts.push(t);
                                 }
                             }
+                            if (parts.length > 0) return parts.join('_').slice(0, 50);
+
                             return '';
+                        }
+
+                        function closeDialog(dlg) {
+                            if (!dlg) return;
+                            const closeBtn = dlg.querySelector('[automation-id="tui-dialog__close"]') ||
+                                             dlg.querySelector('[automation-id="autotest_modal_button_close"]') ||
+                                             dlg.querySelector('button.t-wrapper, .t-wrapper button, button[class*="dialog__close"]') ||
+                                             dlg.querySelector('.t-wrapper') ||
+                                             [...dlg.querySelectorAll('button, [role="button"]')].find(b => {
+                                                 const t = norm(b.innerText || b.textContent || '');
+                                                 return t === 'close' || t === 'cancel' || t === 'dismiss' || t === 'ok';
+                                             });
+                            if (closeBtn) {
+                                fireFullClick(closeBtn);
+                            } else {
+                                try {
+                                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+                                } catch (_) {}
+                            }
                         }
 
                         const skippedItems = [];
@@ -604,6 +645,12 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             for (const dlg of allDialogs) {
                                 const dText = norm(dlg.innerText || dlg.textContent || '');
 
+                                // Error or taken or already processed dialogs -> close immediately
+                                if (dText.includes('another trader') || dText.includes('too late') || dText.includes('already processed') || dText.includes('failed dependency')) {
+                                    closeDialog(dlg);
+                                    continue;
+                                }
+
                                 // Check if this is the "Accept for processing" confirmation modal
                                 const confirmBtn = dlg.querySelector('[automation-id="autotest_modal_button_accept"]') ||
                                                    [...dlg.querySelectorAll('button')].find(b => {
@@ -612,44 +659,42 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                                        return autoId === 'autotest_modal_button_accept' || t === 'accept' || t === 'confirm' || t === 'accept for processing';
                                                    });
 
+                                // If confirmBtn was ALREADY clicked or dialog handled, DO NOT CLICK AGAIN!
+                                if (confirmBtn && (confirmBtn.getAttribute('data-p2p-clicked') === 'true' || dlg.getAttribute('data-p2p-handled') === 'true')) {
+                                    closeDialog(dlg);
+                                    continue;
+                                }
+
                                 const isAcceptModal = confirmBtn && !confirmBtn.disabled &&
-                                                      !dText.includes('another trader') &&
-                                                      !dText.includes('too late') &&
-                                                      !dText.includes('already processed');
+                                                      confirmBtn.getAttribute('data-p2p-clicked') !== 'true' &&
+                                                      dlg.getAttribute('data-p2p-handled') !== 'true';
 
                                 if (isAcceptModal) {
+                                    confirmBtn.setAttribute('data-p2p-clicked', 'true');
+                                    dlg.setAttribute('data-p2p-handled', 'true');
                                     finished = true;
                                     cleanup();
                                     fireFullClick(confirmBtn);
+
+                                    const modalMatch = (dlg.outerHTML || '').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+                                    const mOrderId = modalMatch ? modalMatch[0] : (window._lastWsPayout ? window._lastWsPayout.id : 'modal_confirmed');
+                                    if (mOrderId) window._p2pHandledOrderIds.add(mOrderId);
+
+                                    const modalAmt = parseAmount(dlg.innerText || dlg.textContent || '') || 0;
+
                                     resolve({
                                         clicked: true,
                                         confirmed: true,
                                         popup_shown: true,
-                                        amount: 0,
-                                        row_id: 'modal_confirmed',
+                                        amount: modalAmt,
+                                        row_id: mOrderId,
                                         elapsed_ms: 10
                                     });
                                     return;
                                 }
 
-                                // Otherwise, this is a useless/blocking popup (e.g. "Processing of the request", "Accepted by another trader", error alert, etc.)
-                                // Close it immediately using close button / .t-wrapper / Escape!
-                                const closeBtn = dlg.querySelector('[automation-id="tui-dialog__close"]') ||
-                                                 dlg.querySelector('[automation-id="autotest_modal_button_close"]') ||
-                                                 dlg.querySelector('button.t-wrapper, .t-wrapper button, button[class*="dialog__close"]') ||
-                                                 dlg.querySelector('.t-wrapper') ||
-                                                 [...dlg.querySelectorAll('button, [role="button"]')].find(b => {
-                                                     const t = norm(b.innerText || b.textContent || '');
-                                                     return t === 'close' || t === 'cancel' || t === 'dismiss' || t === 'ok';
-                                                 });
-
-                                if (closeBtn) {
-                                    fireFullClick(closeBtn);
-                                } else {
-                                    try {
-                                        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-                                    } catch (_) {}
-                                }
+                                // Otherwise, this is a useless/blocking popup (e.g. "Processing of the request")
+                                closeDialog(dlg);
                             }
 
                             // 2. LASER TARGET: ONLY ROW 1 (THE TOP / NEWEST ORDER IN TABLE)
@@ -667,8 +712,17 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
 
                             if (!topRow) return;
 
+                            // Skip if Row 1 was already clicked / handled
+                            if (topRow.getAttribute('data-p2p-handled') === 'true') {
+                                return;
+                            }
+
                             const btn = topRow.querySelector('[automation-id="autotest_button_tradeAccept"], button, [role="button"], a');
                             if (!btn) return;
+
+                            if (btn.getAttribute('data-p2p-clicked') === 'true') {
+                                return;
+                            }
 
                             const btnText = norm(btn.innerText || btn.textContent || '');
                             const autoId = (btn.getAttribute('automation-id') || '').toLowerCase();
@@ -692,93 +746,108 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             const amt = parseAmount(rowText) || parseAmount(btn.innerText || '');
                             const rowId = extractRowId(topRow);
 
+                            // Skip if this order ID was already handled
+                            if (rowId && window._p2pHandledOrderIds.has(rowId)) {
+                                topRow.setAttribute('data-p2p-handled', 'true');
+                                btn.setAttribute('data-p2p-clicked', 'true');
+                                return;
+                            }
+
                             if (amt !== null) {
                                 if (minAmt !== null && amt < minAmt) {
                                     outOfRangeCount++;
                                     skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} < Min ₹${minAmt}` });
-                                    return; // Top order out of range; wait for next top order
+                                    return;
                                 }
                                 if (maxAmt !== null && amt > maxAmt) {
                                     outOfRangeCount++;
                                     skippedItems.push({ row_id: rowId, amount: amt, outcome: 'SKIPPED', reason: `Amount ₹${amt} > Max ₹${maxAmt}` });
-                                    return; // Top order out of range; wait for next top order
+                                    return;
                                 }
                             }
 
                             // 0ms LASER HIT ON TOP ORDER!
+                            topRow.setAttribute('data-p2p-handled', 'true');
+                            btn.setAttribute('data-p2p-clicked', 'true');
+                            if (rowId) window._p2pHandledOrderIds.add(rowId);
+
                             finished = true;
                             cleanup();
                             fireFullClick(btn);
                             const startTime = performance.now();
 
-                                modalTimer = setInterval(() => {
-                                    const elapsed = performance.now() - startTime;
+                            modalTimer = setInterval(() => {
+                                const elapsed = performance.now() - startTime;
 
-                                    const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
-                                                       [...document.querySelectorAll('section[role="dialog"] button, [role="dialog"] button')].find(b => {
-                                                           const t = norm(b.innerText || b.textContent || '');
-                                                           return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
-                                                       });
-                                    if (confirmBtn && !confirmBtn.disabled) {
+                                const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
+                                                   [...document.querySelectorAll('section[role="dialog"] button, [role="dialog"] button')].find(b => {
+                                                       const t = norm(b.innerText || b.textContent || '');
+                                                       return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
+                                                   });
+                                if (confirmBtn && !confirmBtn.disabled && confirmBtn.getAttribute('data-p2p-clicked') !== 'true') {
+                                    confirmBtn.setAttribute('data-p2p-clicked', 'true');
+                                    const parentDlg = confirmBtn.closest('section[role="dialog"], [role="dialog"], .tui-dialog');
+                                    if (parentDlg) parentDlg.setAttribute('data-p2p-handled', 'true');
+                                    clearInterval(modalTimer);
+                                    fireFullClick(confirmBtn);
+                                    resolve({
+                                        clicked: true,
+                                        confirmed: true,
+                                        popup_shown: true,
+                                        amount: amt || 0,
+                                        row_id: rowId,
+                                        elapsed_ms: Math.round(elapsed)
+                                    });
+                                    return;
+                                }
+
+                                const dialog = document.querySelector('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden)');
+                                if (dialog) {
+                                    const dText = norm(dialog.innerText || dialog.textContent || '');
+                                    if (dText.includes('processing of the request') || dText.includes('make and confirm the transfer') || dText.includes('payment method')) {
                                         clearInterval(modalTimer);
-                                        fireFullClick(confirmBtn);
+                                        const modalAmt = parseAmount(dialog.innerText || dialog.textContent || '');
                                         resolve({
                                             clicked: true,
                                             confirmed: true,
                                             popup_shown: true,
+                                            processing_opened: true,
+                                            amount: modalAmt || amt || 0,
+                                            row_id: rowId,
+                                            elapsed_ms: Math.round(elapsed)
+                                        });
+                                        return;
+                                    }
+                                    if (dText.includes('another trader') || dText.includes('too late') || dText.includes('expired') || dText.includes('already processed')) {
+                                        clearInterval(modalTimer);
+                                        closeDialog(dialog);
+                                        resolve({
+                                            clicked: true,
+                                            confirmed: false,
+                                            popup_shown: true,
+                                            taken_by_other: true,
                                             amount: amt || 0,
                                             row_id: rowId,
                                             elapsed_ms: Math.round(elapsed)
                                         });
                                         return;
                                     }
+                                }
 
-                                    const dialog = document.querySelector('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden)');
-                                    if (dialog) {
-                                        const dText = norm(dialog.innerText || dialog.textContent || '');
-                                        if (dText.includes('processing of the request') || dText.includes('make and confirm the transfer') || dText.includes('payment method')) {
-                                            clearInterval(modalTimer);
-                                            const modalAmt = parseAmount(dialog.innerText || dialog.textContent || '');
-                                            resolve({
-                                                clicked: true,
-                                                confirmed: true,
-                                                popup_shown: true,
-                                                processing_opened: true,
-                                                amount: modalAmt || amt || 0,
-                                                row_id: rowId,
-                                                elapsed_ms: Math.round(elapsed)
-                                            });
-                                            return;
-                                        }
-                                        if (dText.includes('another trader') || dText.includes('too late') || dText.includes('expired')) {
-                                            clearInterval(modalTimer);
-                                            resolve({
-                                                clicked: true,
-                                                confirmed: false,
-                                                popup_shown: true,
-                                                taken_by_other: true,
-                                                amount: amt || 0,
-                                                row_id: rowId,
-                                                elapsed_ms: Math.round(elapsed)
-                                            });
-                                            return;
-                                        }
-                                    }
+                                if (elapsed > 2000) {
+                                    clearInterval(modalTimer);
+                                    resolve({
+                                        clicked: true,
+                                        confirmed: true,
+                                        popup_shown: !!dialog,
+                                        amount: amt || 0,
+                                        row_id: rowId,
+                                        elapsed_ms: Math.round(elapsed)
+                                    });
+                                }
+                            }, 10);
 
-                                    if (elapsed > 2000) {
-                                        clearInterval(modalTimer);
-                                        resolve({
-                                            clicked: true,
-                                            confirmed: true,
-                                            popup_shown: !!dialog,
-                                            amount: amt || 0,
-                                            row_id: rowId,
-                                            elapsed_ms: Math.round(elapsed)
-                                        });
-                                    }
-                                }, 10);
-
-                                return;
+                            return;
                         }
 
                         try {
@@ -854,7 +923,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             }
                         }, 2500);
                     });
-                }""", [min_amt_f, max_amt_f])
+                }""", [min_amt_f, max_amt_f, list(handled_order_ids)])
 
                 if not turbo.get("clicked"):
                     if turbo.get("warning"):
@@ -930,7 +999,14 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 row_id = turbo.get("row_id", "")
                 lat = turbo.get("elapsed_ms", round((time.perf_counter() - started) * 1000))
 
+                # Allow up to 350ms for background accept network response to arrive in accept_resp
+                wait_deadline = time.monotonic() + 0.35
+                while not accept_resp and time.monotonic() < wait_deadline:
+                    page.wait_for_timeout(30)
+
                 if turbo.get("taken_by_other"):
+                    if row_id:
+                        handled_order_ids.add(row_id)
                     record(amount, True, "TAKEN_BY_OTHER", lat, row_id=row_id)
                     log(f"Order #{row_id} (₹{amount}) was taken by another trader in {lat}ms.")
                     _close_any_dialog(page)
@@ -949,6 +1025,9 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     elif status == 424 and "MAX_SIMULTANEOUS" in body:
                         outcome, err = "LIMIT_REACHED", "Max simultaneous orders reached"
 
+                if row_id:
+                    handled_order_ids.add(row_id)
+
                 record(amount, True, outcome, lat, err, row_id=row_id)
 
                 if outcome == "ACCEPTED":
@@ -956,6 +1035,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     if config.get("max_clicks") and seq >= config["max_clicks"]:
                         log(f"Reached configured limit of {config['max_clicks']} orders. Stopping run.")
                         break
+                    _close_any_dialog(page)
                     # Wait 5s cooldown after an accept before taking next order
                     if stop_event.wait(5.0):
                         break
@@ -1137,6 +1217,8 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                                         window.dispatchEvent(new CustomEvent('p2p:order:new', { detail: window._lastWsPayout }));
                                     } else if (message.type === 'PAYOUT_ACCEPTED_BY_ANOTHER_TRADER') {
                                         const orderId = payload?.payoutId;
+                                        window._p2pHandledOrderIds = window._p2pHandledOrderIds || new Set();
+                                        if (orderId) window._p2pHandledOrderIds.add(orderId);
                                         window.dispatchEvent(new CustomEvent('p2p:order:taken', { detail: { id: orderId } }));
                                     }
                                 } catch (err) {}
@@ -1154,6 +1236,7 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
             page.on("pageerror", lambda error: js_errors.append(_redact(str(error), config)))
             page.on("console", lambda message: js_errors.append(_redact(message.text, config)) if message.type == "error" and "status of 424" not in message.text else None)
             accept_resp: list[tuple[int, str, str | None]] = []
+            handled_order_ids: set[str] = set()
             read_request = None
             target = urlparse(config["site_url"])
 
@@ -1196,6 +1279,16 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                             except Exception:
                                 pass
                             log(f"🌐 API {req.method} {u_path} -> HTTP {response.status} | {snippet}")
+
+                            # Automatically extract payout UUID and register as handled
+                            p_match = re.search(r"/payouts/trader/([0-9a-f-]+)/accept", u_path, re.IGNORECASE)
+                            if p_match:
+                                p_id = p_match.group(1)
+                                handled_order_ids.add(p_id)
+                                try:
+                                    page.evaluate("id => { window._p2pHandledOrderIds = window._p2pHandledOrderIds || new Set(); window._p2pHandledOrderIds.add(id); }", p_id)
+                                except Exception:
+                                    pass
 
                         if req.method in ("POST", "PUT", "PATCH"):
                             if response.status == 429:
@@ -1318,7 +1411,7 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                 log("On payouts page! Active order monitoring started.")
                 min_amount = Decimal(config["min_amount"]) if config.get("min_amount") else None
                 max_amount = Decimal(config["max_amount"]) if config.get("max_amount") else None
-                rate_limit = _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accept_resp, js_errors, server_errors, min_amount, max_amount)
+                rate_limit = _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accept_resp, js_errors, server_errors, min_amount, max_amount, handled_order_ids)
                 if rate_limit:
                     failure, retry_after = rate_limit
                     status = "stopped"
