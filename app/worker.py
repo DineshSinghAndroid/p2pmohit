@@ -497,6 +497,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
     seq = 0
     last_click = [0.0]
     last_tab_switch = [time.monotonic()]
+    last_page_reload = [time.monotonic()]
     last_heartbeat = [time.monotonic()]
     seen_skipped_ids = set()
     consecutive_429 = [0]
@@ -883,7 +884,20 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         oor = turbo.get("out_of_range_count", 0)
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
-                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 30s tab switch armed (5s stay).")
+                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 30s tab switch + 2m auto-reload active.")
+
+                    if time.monotonic() - last_page_reload[0] >= 120.0:
+                        last_page_reload[0] = time.monotonic()
+                        last_tab_switch[0] = time.monotonic()
+                        if page.locator('[automation-id="autotest_modal_button_accept"]:visible').count() == 0:
+                            log("🔄 2-minute auto site refresh: Reloading payouts page...")
+                            _close_any_dialog(page)
+                            try:
+                                page.reload(wait_until="domcontentloaded", timeout=15_000)
+                                page.wait_for_timeout(300)
+                            except Exception:
+                                pass
+                            continue
 
                     if time.monotonic() - last_tab_switch[0] >= 30.0:
                         last_tab_switch[0] = time.monotonic()
