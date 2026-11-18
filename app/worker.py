@@ -472,6 +472,8 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         let scanInterval = null;
                         let modalTimer = null;
                         let observer = null;
+                        let orderListener = null;
+                        let takenListener = null;
 
                         function fireFullClick(el) {
                             if (!el) return;
@@ -706,7 +708,20 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 clearInterval(modalTimer);
                                 modalTimer = null;
                             }
+                            if (orderListener) {
+                                try { window.removeEventListener('p2p:order:new', orderListener); } catch(_) {}
+                                orderListener = null;
+                            }
+                            if (takenListener) {
+                                try { window.removeEventListener('p2p:order:taken', takenListener); } catch(_) {}
+                                takenListener = null;
+                            }
                         }
+
+                        orderListener = () => { checkPage(); };
+                        takenListener = () => { checkPage(); };
+                        window.addEventListener('p2p:order:new', orderListener);
+                        window.addEventListener('p2p:order:taken', takenListener);
 
                         scanInterval = setInterval(checkPage, 20);
                         checkPage();
@@ -956,6 +971,53 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
                     Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 """)
+            context.add_init_script("""
+                (function() {
+                    const OrigWebSocket = window.WebSocket;
+                    if (!OrigWebSocket) return;
+                    window._p2pSockets = window._p2pSockets || [];
+                    window._lastWsPayout = null;
+
+                    class P2PWebSocket extends OrigWebSocket {
+                        constructor(url, protocols) {
+                            super(url, protocols);
+                            try {
+                                window._p2pSockets.push(this);
+                                window._activeP2pSocket = this;
+                                const safeUrl = typeof url === 'string' ? url.split('?')[0] : 'ws';
+                                console.log('[P2P WS Hook] Connected to:', safeUrl);
+                            } catch (e) {}
+
+                            this.addEventListener('message', (event) => {
+                                try {
+                                    const message = JSON.parse(event.data);
+                                    const payload = typeof message.data === 'string' ? JSON.parse(message.data) : message.data;
+
+                                    if (message.type === 'PAYOUT') {
+                                        const order = payload?.payout;
+                                        const orderId = payload?.payoutId ?? order?.id;
+                                        const amount = Number(order?.fiatAmount || 0);
+                                        window._lastWsPayout = {
+                                            id: orderId,
+                                            amount: amount,
+                                            status: payload?.status ?? order?.status,
+                                            created: order?.created,
+                                            time: Date.now()
+                                        };
+                                        console.log('[P2P WS Hook] PAYOUT:', orderId, 'Amount: ₹' + amount);
+                                        window.dispatchEvent(new CustomEvent('p2p:order:new', { detail: window._lastWsPayout }));
+                                    } else if (message.type === 'PAYOUT_ACCEPTED_BY_ANOTHER_TRADER') {
+                                        const orderId = payload?.payoutId;
+                                        window.dispatchEvent(new CustomEvent('p2p:order:taken', { detail: { id: orderId } }));
+                                    }
+                                } catch (err) {}
+                            });
+                        }
+                    }
+
+                    window.WebSocket = P2PWebSocket;
+                })();
+            """)
             page = context.new_page()
             page.set_default_timeout(10_000)
             js_errors: list[str] = []
@@ -1021,6 +1083,20 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                     pass
             page.on("response", _on_accept)
             page.on("response", lambda response: server_errors.append(_redact(f"HTTP {response.status} {response.url[:160]}", config)) if response.status >= 500 else None)
+
+            def _on_ws(ws):
+                safe_url = ws.url.split("?")[0]
+                log(f"🔌 WebSocket connected: {safe_url}")
+                def _on_frame(payload):
+                    try:
+                        text = payload if isinstance(payload, str) else payload.decode("utf-8", "ignore")
+                        if "PAYOUT" in text:
+                            log(f"⚡ WS Event received: {text[:160]}")
+                    except Exception:
+                        pass
+                ws.on("framereceived", _on_frame)
+                ws.on("close", lambda: log(f"🔌 WebSocket closed: {safe_url}", level="DEBUG"))
+            page.on("websocket", _on_ws)
 
             parsed = urlparse(config["site_url"])
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
