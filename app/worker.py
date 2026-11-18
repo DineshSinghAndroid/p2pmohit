@@ -282,24 +282,25 @@ def _tab_switch_refresh(page) -> bool:
 
                 function findTabElement(targetName) {
                     const target = norm(targetName);
-                    const candidates = [
-                        ...document.querySelectorAll('[role="tab"]'),
-                        ...document.querySelectorAll('tui-tabs button, tui-tabs a, tui-tabs [role="tab"], .tui-tab'),
-                        ...document.querySelectorAll('button, a, [role="button"]')
-                    ];
-                    for (const el of candidates) {
+                    const all = [...document.querySelectorAll('*')];
+                    for (const el of all) {
                         const text = norm(el.innerText || el.textContent || '');
-                        if (text === target) return el;
+                        if (text === target) {
+                            const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '') === target);
+                            if (!hasChildMatch) {
+                                const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
+                                return clickable || el;
+                            }
+                        }
                     }
-                    for (const el of candidates) {
+                    for (const el of all) {
                         const text = norm(el.innerText || el.textContent || '');
-                        if (text.includes(target) && text.length < target.length + 15) return el;
-                    }
-                    const allEls = document.querySelectorAll('*');
-                    for (const el of allEls) {
-                        if (el.children.length <= 2) {
-                            const text = norm(el.innerText || el.textContent || '');
-                            if (text === target) return el;
+                        if (text.includes(target) && text.length < target.length + 25) {
+                            const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '').includes(target));
+                            if (!hasChildMatch) {
+                                const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
+                                return clickable || el;
+                            }
                         }
                     }
                     return null;
@@ -313,7 +314,7 @@ def _tab_switch_refresh(page) -> bool:
                     setTimeout(() => {
                         fireFullClick(awaitingTab);
                         resolve({ switched: true, method: 'in_processing_to_awaiting' });
-                    }, 35);
+                    }, 200);
                 } else if (awaitingTab) {
                     fireFullClick(awaitingTab);
                     resolve({ switched: true, method: 'awaiting_only' });
@@ -327,7 +328,7 @@ def _tab_switch_refresh(page) -> bool:
                         fireFullClick(ref);
                         resolve({ switched: true, method: 'refresh_button' });
                     } else {
-                        resolve({ switched: false });
+                        resolve({ switched: false, method: 'tabs_not_found' });
                     }
                 }
             });
@@ -717,21 +718,32 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
 
                         function findTabElement(targetName) {
                             const target = norm(targetName);
-                            const candidates = [
-                                ...document.querySelectorAll('[role="tab"]'),
-                                ...document.querySelectorAll('tui-tabs button, tui-tabs a, tui-tabs [role="tab"], .tui-tab'),
-                                ...document.querySelectorAll('button, a, [role="button"]')
-                            ];
-                            for (const el of candidates) {
+                            const all = [...document.querySelectorAll('*')];
+                            for (const el of all) {
                                 const text = norm(el.innerText || el.textContent || '');
-                                if (text === target) return el;
+                                if (text === target) {
+                                    const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '') === target);
+                                    if (!hasChildMatch) {
+                                        const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
+                                        return clickable || el;
+                                    }
+                                }
                             }
-                            for (const el of candidates) {
+                            for (const el of all) {
                                 const text = norm(el.innerText || el.textContent || '');
-                                if (text.includes(target) && text.length < target.length + 15) return el;
+                                if (text.includes(target) && text.length < target.length + 25) {
+                                    const hasChildMatch = [...el.children].some(c => norm(c.innerText || c.textContent || '').includes(target));
+                                    if (!hasChildMatch) {
+                                        const clickable = el.closest('button, a, [role="tab"], tui-tab, .tui-tab, [role="button"]');
+                                        return clickable || el;
+                                    }
+                                }
                             }
                             return null;
                         }
+
+                        let tabSwitchesCount = 0;
+                        let lastTabMethod = '';
 
                         function doTabSwitch() {
                             if (finished) return;
@@ -739,13 +751,27 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             const awaitingTab = findTabElement('awaiting processing');
                             if (inProcessingTab && awaitingTab) {
                                 fireFullClick(inProcessingTab);
+                                tabSwitchesCount++;
+                                lastTabMethod = 'switched_in_proc_and_awaiting';
                                 setTimeout(() => {
                                     if (!finished) {
                                         fireFullClick(awaitingTab);
                                     }
-                                }, 35);
+                                }, 200);
                             } else if (awaitingTab) {
                                 fireFullClick(awaitingTab);
+                                tabSwitchesCount++;
+                                lastTabMethod = 'clicked_awaiting';
+                            } else {
+                                const btns = [...document.querySelectorAll('button, a[role="button"]')];
+                                const ref = btns.find(b => norm(b.innerText || b.textContent || '').includes('refresh'));
+                                if (ref) {
+                                    fireFullClick(ref);
+                                    tabSwitchesCount++;
+                                    lastTabMethod = 'clicked_refresh_btn';
+                                } else {
+                                    lastTabMethod = 'tabs_not_found';
+                                }
                             }
                         }
 
@@ -798,7 +824,9 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                     taken_count: taken,
                                     out_of_range_count: outOfRangeCount,
                                     skipped_items: skippedItems.slice(0, 5),
-                                    warning: banner
+                                    warning: banner,
+                                    tab_switches: tabSwitchesCount,
+                                    tab_method: lastTabMethod
                                 });
                             }
                         }, 2500);
@@ -808,6 +836,12 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                 if not turbo.get("clicked"):
                     if turbo.get("warning"):
                         log(f"⚠️ TARGET SITE ALERT: {turbo['warning']}", level="WARN")
+
+                    if turbo.get("tab_switches", 0) > 0:
+                        method = turbo.get("tab_method", "ok")
+                        log(f"🔄 Tab switch active: {method} ({turbo['tab_switches']}x). API recalled.")
+                    elif turbo.get("tab_method") == "tabs_not_found":
+                        log("⚠️ Target tabs ('In processing' / 'Awaiting processing') not detected in DOM.", level="WARN")
 
                     for item in turbo.get("skipped_items", []):
                         r_id = item.get("row_id") or f"row_{item.get('amount')}"
