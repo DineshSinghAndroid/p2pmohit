@@ -254,7 +254,22 @@ def get_run(run_id: str, request: Request):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     clicks = DB.list_clicks(run_id)
-    return {"run": run, "clicks": clicks, "stats": calculate_stats(clicks)}
+    logs = DB.list_logs(run_id) if hasattr(DB, "list_logs") else []
+    return {"run": run, "clicks": clicks, "stats": calculate_stats(clicks), "logs": logs}
+
+
+@app.get("/api/debug/system")
+def debug_system(request: Request):
+    _authenticated(request)
+    runs = DB.list_runs(limit=10)
+    latest_logs = []
+    if runs and hasattr(DB, "list_logs"):
+        latest_logs = DB.list_logs(runs[0]["id"], limit=50)
+    return {
+        "active_events": list(RUN_EVENTS.keys()),
+        "runs": runs,
+        "latest_run_logs": latest_logs,
+    }
 
 
 @app.get("/api/runs/{run_id}/export.csv")

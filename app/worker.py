@@ -817,7 +817,12 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                 if proxy_cfg:
                     fallback_kwargs["proxy"] = proxy_cfg
                 browser = playwright.chromium.launch(**fallback_kwargs)
-            context = browser.new_context(viewport={"width": 1280, "height": 800})
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                locale="en-US",
+                timezone_id="Asia/Kolkata",
+            )
             if stealth:
                 context.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -877,37 +882,88 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
             parsed = urlparse(config["site_url"])
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("Site URL must be a valid http or https URL")
+            def log(msg: str, level: str = "INFO"):
+                if hasattr(db, "add_log"):
+                    try:
+                        db.add_log(run_id, msg, level)
+                    except Exception:
+                        pass
+
+            log(f"Worker started. Headless: {headless}, Stealth: {stealth}, Proxy: {'Yes' if proxy_cfg else 'Direct'}")
             origin = f"{parsed.scheme}://{parsed.netloc}"
 
             db.update_login_status(run_id, "logging_in")
+            log(f"Navigating to login page ({origin}/login)...")
             page.goto(f"{origin}/login", wait_until="domcontentloaded", timeout=30_000)
+
+            auth_fail_msg = [None]
+            def _check_auth_resp(response):
+                if any(x in response.url for x in ("/api/login", "/api/auth", "/api/user")):
+                    if response.status >= 400:
+                        try:
+                            body = response.json()
+                            auth_fail_msg[0] = body.get("message") or body.get("error") or body.get("detail") or f"HTTP {response.status}"
+                        except Exception:
+                            auth_fail_msg[0] = f"HTTP {response.status}"
+
+            page.on("response", _check_auth_resp)
+
             if "/login" in page.url or page.locator('input[type="password"]').count():
-                email = page.get_by_role("textbox", name=re.compile("email", re.IGNORECASE))
-                if not email.count():
-                    email = page.locator('input[type="email"], input[autocomplete="username"], input[type="text"]').first
+                log("Login page loaded. Waiting for form fields...")
+                try:
+                    page.wait_for_selector('input[type="password"], input[type="email"], input[name="email"]', timeout=10_000)
+                except Exception:
+                    pass
+                email = page.locator('input[type="email"], input[name="email"], input[autocomplete="username"], input[type="text"]').first
                 password = page.locator('input[type="password"]').first
                 email.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
                 password.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
+                log(f"Filling account credentials ({config.get('email', '')[:4]}***)...")
                 email.fill(config["email"])
                 password.fill(config["password"])
+                log("Clicking Sign In button...")
                 sign_btn = page.get_by_role("button", name=re.compile(r"sign in|log in|login", re.IGNORECASE))
                 if sign_btn.count():
                     sign_btn.first.click(timeout=10_000)
                 else:
                     page.locator('button[type="submit"], input[type="submit"]').first.click(timeout=10_000)
-                try:
-                    page.wait_for_url(lambda u: "/login" not in u, timeout=LOGIN_TIMEOUT_MS)
-                except Exception as exc:
+
+                log("Credentials submitted. Verifying session...")
+                start_login_wait = time.monotonic()
+                while time.monotonic() - start_login_wait < 15.0:
+                    if "/login" not in page.url:
+                        break
+                    if auth_fail_msg[0]:
+                        db.update_login_status(run_id, "failed")
+                        err_text = f"Target site error: {auth_fail_msg[0]}"
+                        log(err_text, level="ERROR")
+                        raise RuntimeError(err_text)
                     err_msg = ""
                     try:
-                        err_el = page.locator('[role="alert"], .error, .alert, .tui-notification, [class*="error"]').first
-                        if err_el.count() and err_el.is_visible():
-                            err_msg = err_el.inner_text().strip()
+                        app_text = page.locator('app-root').inner_text(timeout=300)
+                        if "incorrect email or password" in app_text.lower():
+                            err_msg = "Incorrect email or password"
+                        elif "invalid" in app_text.lower():
+                            for l in app_text.splitlines():
+                                if any(w in l.lower() for w in ("invalid", "incorrect", "failed", "blocked", "suspended")):
+                                    err_msg = l.strip()
+                                    break
                     except Exception:
                         pass
-                    db.update_login_status(run_id, "failed")
-                    raise RuntimeError(f"Login failed: {err_msg or 'login redirect was not observed'}") from exc
+                    if err_msg:
+                        db.update_login_status(run_id, "failed")
+                        log(f"Login failed: {err_msg}", level="ERROR")
+                        raise RuntimeError(f"Target site error: {err_msg}")
+                    page.wait_for_timeout(300)
+                    if stop_event.is_set():
+                        return
 
+                if "/login" in page.url:
+                    db.update_login_status(run_id, "failed")
+                    log("Login timed out: did not leave login page", level="ERROR")
+                    raise RuntimeError("Login failed: page did not leave /login after 15 seconds")
+
+            log("Login verified! Navigating to /payouts...")
             db.update_login_status(run_id, "navigating_payouts")
             if stop_event.is_set():
                 status = "stopped"
@@ -917,6 +973,7 @@ def run_browser(run_id: str, config: dict, stop_event: threading.Event, db, scre
                 _close_chat_toast(page)
                 _dismiss_blocking_dialogs(page)
                 db.update_login_status(run_id, "success")
+                log("On payouts page! Active order monitoring started.")
                 min_amount = Decimal(config["min_amount"]) if config.get("min_amount") else None
                 max_amount = Decimal(config["max_amount"]) if config.get("max_amount") else None
                 rate_limit = _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accept_resp, js_errors, server_errors, min_amount, max_amount)

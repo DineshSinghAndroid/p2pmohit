@@ -34,6 +34,14 @@ class Database:
                     error_text TEXT
                 );
                 CREATE INDEX IF NOT EXISTS clicks_run_id ON clicks(run_id);
+                CREATE TABLE IF NOT EXISTS run_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL REFERENCES runs(id),
+                    timestamp TEXT NOT NULL,
+                    level TEXT NOT NULL DEFAULT 'INFO',
+                    message TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS run_logs_run_id ON run_logs(run_id);
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
             if "clicks_per_minute" not in columns:
@@ -87,3 +95,19 @@ class Database:
         with self.connect() as db:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM clicks WHERE run_id=? ORDER BY id", (run_id,)).fetchall()]
+
+    def add_log(self, run_id: str, message: str, level: str = "INFO"):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO run_logs (run_id, timestamp, level, message) VALUES (?, ?, ?, ?)",
+                (run_id, now, level, str(message)[:500]),
+            )
+
+    def list_logs(self, run_id: str, limit: int = 200):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM run_logs WHERE run_id=? ORDER BY id ASC LIMIT ?",
+                (run_id, limit),
+            ).fetchall()]
