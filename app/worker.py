@@ -257,40 +257,87 @@ def _watch_counts(page, state):
     page.on("response", on_resp)
 
 
-def _refresh_list(page):
-    try:
-        refreshed = page.evaluate("""() => {
-            const btns = [...document.querySelectorAll('button, a[role="button"]')];
-            const ref = btns.find(b => {
-                const text = (b.innerText || b.textContent || '').trim().toLowerCase();
-                const autoId = (b.getAttribute('automation-id') || '').toLowerCase();
-                const title = (b.getAttribute('title') || '').toLowerCase();
-                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                const iconSvg = b.querySelector('svg, i, tui-svg');
-                const iconHtml = iconSvg ? (iconSvg.outerHTML || '').toLowerCase() : '';
+def _tab_switch_refresh(page) -> bool:
+    """Recalls the payouts API by switching tabs ('In processing' -> 'Awaiting processing').
 
-                if (/refresh|reload|sync|update|обновить/i.test(text)) return true;
-                if (/refresh|reload|sync/i.test(autoId)) return true;
-                if (/refresh|reload|sync/i.test(title)) return true;
-                if (/refresh|reload|sync/i.test(aria)) return true;
-                if (/refresh|reload|sync|rotate/i.test(iconHtml)) return true;
-                return false;
+    This avoids destructive hard page reloads and instantly triggers Angular's
+    internal HTTP data fetch without unmounting the DOM or dropping WebSocket state.
+    """
+    try:
+        switched = page.evaluate("""() => {
+            return new Promise((resolve) => {
+                function fireFullClick(el) {
+                    if (!el) return;
+                    try { el.focus(); } catch(_) {}
+                    try { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch(_) {}
+                    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); } catch(_) {}
+                    try { el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true })); } catch(_) {}
+                    try { el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); } catch(_) {}
+                    try { el.click(); } catch(_) {}
+                }
+
+                function norm(s) {
+                    return (s || '').replace(/[\\s\\u00a0\\u202f\\n\\r\\t]+/g, ' ').trim().toLowerCase();
+                }
+
+                function findTabElement(targetName) {
+                    const target = norm(targetName);
+                    const candidates = [
+                        ...document.querySelectorAll('[role="tab"]'),
+                        ...document.querySelectorAll('tui-tabs button, tui-tabs a, tui-tabs [role="tab"], .tui-tab'),
+                        ...document.querySelectorAll('button, a, [role="button"]')
+                    ];
+                    for (const el of candidates) {
+                        const text = norm(el.innerText || el.textContent || '');
+                        if (text === target) return el;
+                    }
+                    for (const el of candidates) {
+                        const text = norm(el.innerText || el.textContent || '');
+                        if (text.includes(target) && text.length < target.length + 15) return el;
+                    }
+                    const allEls = document.querySelectorAll('*');
+                    for (const el of allEls) {
+                        if (el.children.length <= 2) {
+                            const text = norm(el.innerText || el.textContent || '');
+                            if (text === target) return el;
+                        }
+                    }
+                    return null;
+                }
+
+                const inProcessingTab = findTabElement('in processing');
+                const awaitingTab = findTabElement('awaiting processing');
+
+                if (inProcessingTab && awaitingTab) {
+                    fireFullClick(inProcessingTab);
+                    setTimeout(() => {
+                        fireFullClick(awaitingTab);
+                        resolve({ switched: true, method: 'in_processing_to_awaiting' });
+                    }, 35);
+                } else if (awaitingTab) {
+                    fireFullClick(awaitingTab);
+                    resolve({ switched: true, method: 'awaiting_only' });
+                } else {
+                    const btns = [...document.querySelectorAll('button, a[role="button"]')];
+                    const ref = btns.find(b => {
+                        const text = norm(b.innerText || b.textContent || '');
+                        return text === 'refresh list' || text.includes('refresh');
+                    });
+                    if (ref) {
+                        fireFullClick(ref);
+                        resolve({ switched: true, method: 'refresh_button' });
+                    } else {
+                        resolve({ switched: false });
+                    }
+                }
             });
-            if (ref && !ref.disabled && ref.offsetParent !== null) {
-                ref.click();
-                return true;
-            }
-            // Fallback: in-page payouts tab or filter link
-            const payoutsTab = document.querySelector('a[routerlink*="payouts"], a[href$="/payouts"]');
-            if (payoutsTab && !payoutsTab.disabled && payoutsTab.offsetParent !== null) {
-                payoutsTab.click();
-                return true;
-            }
-            return false;
         }""")
-        return bool(refreshed)
+        return bool(switched and switched.get("switched"))
     except Exception:
         return False
+
+
+_refresh_list = _tab_switch_refresh
 
 
 
@@ -668,6 +715,40 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                             }
                         }
 
+                        function findTabElement(targetName) {
+                            const target = norm(targetName);
+                            const candidates = [
+                                ...document.querySelectorAll('[role="tab"]'),
+                                ...document.querySelectorAll('tui-tabs button, tui-tabs a, tui-tabs [role="tab"], .tui-tab'),
+                                ...document.querySelectorAll('button, a, [role="button"]')
+                            ];
+                            for (const el of candidates) {
+                                const text = norm(el.innerText || el.textContent || '');
+                                if (text === target) return el;
+                            }
+                            for (const el of candidates) {
+                                const text = norm(el.innerText || el.textContent || '');
+                                if (text.includes(target) && text.length < target.length + 15) return el;
+                            }
+                            return null;
+                        }
+
+                        function doTabSwitch() {
+                            if (finished) return;
+                            const inProcessingTab = findTabElement('in processing');
+                            const awaitingTab = findTabElement('awaiting processing');
+                            if (inProcessingTab && awaitingTab) {
+                                fireFullClick(inProcessingTab);
+                                setTimeout(() => {
+                                    if (!finished) {
+                                        fireFullClick(awaitingTab);
+                                    }
+                                }, 35);
+                            } else if (awaitingTab) {
+                                fireFullClick(awaitingTab);
+                            }
+                        }
+
                         let observer = null;
                         try {
                             observer = new MutationObserver(() => checkPage());
@@ -675,6 +756,9 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         } catch (_) {}
 
                         const scanInterval = setInterval(checkPage, 25);
+                        const tabSwitchInterval = setInterval(() => {
+                            if (!finished) doTabSwitch();
+                        }, 1200);
                         checkPage();
 
                         function cleanup() {
@@ -682,6 +766,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 try { observer.disconnect(); } catch(_) {}
                             }
                             clearInterval(scanInterval);
+                            clearInterval(tabSwitchInterval);
                             clearTimeout(timeoutTimer);
                         }
 
@@ -748,7 +833,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         oor = turbo.get("out_of_range_count", 0)
                         range_str = f"₹{int(min_amt_f):,}" if min_amt_f else "₹0"
                         range_str += f" - ₹{int(max_amt_f):,}" if max_amt_f else " - ∞"
-                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). 0ms instant trigger armed.")
+                        log(f"Active MutationObserver: {t_rows} orders visible ({taken} taken, {oor} outside [{range_str}]). Tab switch armed (recalls API without reload).")
 
                     if stop_event.wait(0.01):
                         break
@@ -764,6 +849,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     record(amount, True, "TAKEN_BY_OTHER", lat, row_id=row_id)
                     log(f"Order #{row_id} (₹{amount}) was taken by another trader in {lat}ms.")
                     _close_any_dialog(page)
+                    _tab_switch_refresh(page)
                     continue
 
                 outcome = "ACCEPTED"
@@ -789,6 +875,7 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     # Wait 5s cooldown after an accept before taking next order
                     if stop_event.wait(5.0):
                         break
+                    _tab_switch_refresh(page)
                     continue
 
                 if outcome == "RATE_LIMITED":
@@ -801,10 +888,12 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                     if stop_event.wait(wait_s):
                         break
                     db.update_run(run_id, "running", error_text=None)
+                    _tab_switch_refresh(page)
                     continue
 
                 consecutive_429[0] = 0
                 _close_any_dialog(page)
+                _tab_switch_refresh(page)
                 if stop_event.wait(0.05):
                     break
             except Exception as exc:
