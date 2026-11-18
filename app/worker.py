@@ -260,9 +260,11 @@ def _watch_counts(page, state):
 def _do_page_refresh(page) -> bool:
     """10-second auto page reload: Refreshes the payouts list."""
     try:
-        # Don't reload if an order modal/dialog is currently visible
-        if page.locator('section[role="dialog"], [role="dialog"], .tui-dialog').count() > 0:
+        # Don't reload if the Accept confirmation modal is currently visible
+        if page.locator('[automation-id="autotest_modal_button_accept"]:visible').count() > 0:
             return False
+        # If any other stray dialog is open, close it first
+        _close_any_dialog(page)
         page.reload(wait_until="domcontentloaded", timeout=15_000)
         page.wait_for_timeout(300)
         return True
@@ -306,26 +308,26 @@ CLICK_COOLDOWN_S = 2.0  # min gap between two Accept-for-processing clicks (avoi
 ACCEPT_SEL = '[automation-id="autotest_button_tradeAccept"]'
 CONFIRM_SEL = '[automation-id="autotest_modal_button_accept"]'
 MODAL_CLOSE_SEL = '[automation-id="autotest_modal_button_close"]'
-X_SEL = '[automation-id="tui-dialog__close"], .tui-dialog__close, button[class*="dialog__close"]'
+X_SEL = '[automation-id="tui-dialog__close"], .tui-dialog__close, button[class*="dialog__close"], button.t-wrapper, .t-wrapper, button:has-text("Close"), button:has-text("Cancel")'
 
 
 def _close_any_dialog(page) -> None:
-    """Close whatever dialog is open using the top-right X only (never an action button)."""
-    for _ in range(5):
+    """Close whatever useless dialog is open using the top-right X, .t-wrapper, or Escape."""
+    for _ in range(3):
         try:
-            dlg = page.locator('section[role="dialog"]:visible')
+            dlg = page.locator('section[role="dialog"]:visible, [role="dialog"]:visible, .tui-dialog:visible')
             if not dlg.count():
                 return
             x = dlg.last.locator(X_SEL)
             if x.count():
-                x.first.click(timeout=2_000)
+                x.first.click(timeout=1_500)
             else:
                 m = dlg.last.locator(MODAL_CLOSE_SEL)
                 if m.count():
-                    m.first.click(timeout=2_000)  # plain "Close" of the Accept/other-trader dialog
+                    m.first.click(timeout=1_500)
                 else:
                     page.keyboard.press("Escape")
-            page.wait_for_timeout(350)
+            page.wait_for_timeout(200)
         except Exception:
             try:
                 page.keyboard.press("Escape")
@@ -545,25 +547,57 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                         function checkPage() {
                             if (finished) return;
 
-                            // 1. If confirmation modal is open, click accept immediately
-                            const confirmBtn = document.querySelector('[automation-id="autotest_modal_button_accept"]') ||
-                                               [...document.querySelectorAll('section[role="dialog"] button, [role="dialog"] button, .tui-dialog button')].find(b => {
-                                                   const t = norm(b.innerText || b.textContent || '');
-                                                   return t === 'accept' || t === 'confirm' || b.getAttribute('automation-id') === 'autotest_modal_button_accept';
-                                               });
-                            if (confirmBtn && !confirmBtn.disabled) {
-                                finished = true;
-                                cleanup();
-                                fireFullClick(confirmBtn);
-                                resolve({
-                                    clicked: true,
-                                    confirmed: true,
-                                    popup_shown: true,
-                                    amount: 0,
-                                    row_id: 'modal_confirmed',
-                                    elapsed_ms: 10
-                                });
-                                return;
+                            // 1. Process all open popups/dialogs
+                            const allDialogs = document.querySelectorAll('section[role="dialog"]:not(.hidden), [role="dialog"]:not(.hidden), .tui-dialog, tui-dialog');
+                            for (const dlg of allDialogs) {
+                                const dText = norm(dlg.innerText || dlg.textContent || '');
+
+                                // Check if this is the "Accept for processing" confirmation modal
+                                const confirmBtn = dlg.querySelector('[automation-id="autotest_modal_button_accept"]') ||
+                                                   [...dlg.querySelectorAll('button')].find(b => {
+                                                       const t = norm(b.innerText || b.textContent || '');
+                                                       const autoId = (b.getAttribute('automation-id') || '').toLowerCase();
+                                                       return autoId === 'autotest_modal_button_accept' || t === 'accept' || t === 'confirm' || t === 'accept for processing';
+                                                   });
+
+                                const isAcceptModal = confirmBtn && !confirmBtn.disabled &&
+                                                      !dText.includes('another trader') &&
+                                                      !dText.includes('too late') &&
+                                                      !dText.includes('already processed');
+
+                                if (isAcceptModal) {
+                                    finished = true;
+                                    cleanup();
+                                    fireFullClick(confirmBtn);
+                                    resolve({
+                                        clicked: true,
+                                        confirmed: true,
+                                        popup_shown: true,
+                                        amount: 0,
+                                        row_id: 'modal_confirmed',
+                                        elapsed_ms: 10
+                                    });
+                                    return;
+                                }
+
+                                // Otherwise, this is a useless/blocking popup (e.g. "Processing of the request", "Accepted by another trader", error alert, etc.)
+                                // Close it immediately using close button / .t-wrapper / Escape!
+                                const closeBtn = dlg.querySelector('[automation-id="tui-dialog__close"]') ||
+                                                 dlg.querySelector('[automation-id="autotest_modal_button_close"]') ||
+                                                 dlg.querySelector('button.t-wrapper, .t-wrapper button, button[class*="dialog__close"]') ||
+                                                 dlg.querySelector('.t-wrapper') ||
+                                                 [...dlg.querySelectorAll('button, [role="button"]')].find(b => {
+                                                     const t = norm(b.innerText || b.textContent || '');
+                                                     return t === 'close' || t === 'cancel' || t === 'dismiss' || t === 'ok';
+                                                 });
+
+                                if (closeBtn) {
+                                    fireFullClick(closeBtn);
+                                } else {
+                                    try {
+                                        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+                                    } catch (_) {}
+                                }
                             }
 
                             // 2. LASER TARGET: ONLY ROW 1 (THE TOP / NEWEST ORDER IN TABLE)
