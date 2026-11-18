@@ -759,7 +759,6 @@ def _continuous_loop(page, config, stop_event, db, run_id, screenshot_dir, accep
                                 }, 10);
 
                                 return;
-                            }
                         }
 
                         function findTabElement(targetName) {
